@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -198,6 +199,28 @@ bool solverStart(const std::string& instanceJson, int budgetSeconds, int workers
     }
     return true;
 }
+
+void solverDrainKernelLog() {
+    // One buffer, reused: a drain happens every 150 ms and most of them find
+    // nothing. Sized to swallow a whole cycle's worth of lines in one call.
+    static std::vector<unsigned char> buf(16 * 1024);
+    for (;;) {
+        const std::size_t n = nk_log_drain(buf.data(), buf.size());
+        if (n == 0) return;
+        // The kernel writes newline-terminated lines; split so each reaches the
+        // log with its own timestamp rather than as one block.
+        const char* p = reinterpret_cast<const char*>(buf.data());
+        const char* end = p + n;
+        while (p < end) {
+            const char* nl = static_cast<const char*>(std::memchr(p, '\n', end - p));
+            const std::size_t len = nl ? static_cast<std::size_t>(nl - p) : static_cast<std::size_t>(end - p);
+            if (len) logLine("  kernel | " + std::string(p, len));
+            p += len + 1;
+        }
+    }
+}
+
+void solverSetLogLevel(int level) { nk_log_set_level(static_cast<std::uint32_t>(level)); }
 
 void solverCancel() { nk_cancel(); }
 

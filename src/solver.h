@@ -39,6 +39,14 @@ void solverShutdown(const adsk::core::Ptr<adsk::core::Application>& app);
 bool solverStart(const std::string& instanceJson, int budgetSeconds, int workers,
                  std::string& error);
 
+/// Moves everything the kernel has logged since the last call into the add-in's
+/// log file. Cheap when there is nothing pending, so it is fine to call on every
+/// progress tick.
+void solverDrainKernelLog();
+
+/// How much the kernel logs. See nk_log_set_level for the scale.
+void solverSetLogLevel(int level);
+
 void solverCancel();
 bool solverBusy();
 bool solverProgress(NkProgress& out);

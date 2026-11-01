@@ -47,6 +47,14 @@ std::size_t nk_placement_count();
 std::int32_t nk_placement_at(std::size_t index, NkPlacement* out);
 float nk_strip_width();
 
+// sparrow narrates its own search through the `log` crate; the kernel captures
+// those lines into a ring buffer instead of letting a GUI process discard them.
+// Drain returns newline-terminated text and 0 when empty, so callers loop.
+// Level: 0 off, 1 error, 2 warn, 3 info, 4 debug, 5 trace. Info is the
+// cycle-by-cycle narrative; debug adds per-iteration separator chatter.
+void nk_log_set_level(std::uint32_t level);
+std::size_t nk_log_drain(unsigned char* buf, std::size_t len);
+
 std::size_t nk_result_len();
 std::size_t nk_result_copy(unsigned char* buf, std::size_t len);
 std::size_t nk_last_error(unsigned char* buf, std::size_t len);

@@ -631,6 +631,7 @@ name = "nest_kernel"
 version = "0.1.0"
 dependencies = [
  "jagua-rs",
+ "log",
  "rand",
  "serde_json",
  "sparrow",

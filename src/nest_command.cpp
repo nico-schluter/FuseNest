@@ -45,6 +45,7 @@ const char* kInSpacing = "fnSpacing";
 const char* kInRotation = "fnRotation";
 const char* kInBudget = "fnBudget";
 const char* kInWorkers = "fnWorkers";
+const char* kInVerbose = "fnVerbose";
 const char* kInStatus = "fnStatus";
 const char* kInJob = "fnJob";
 const char* kInPreviewClock = "fnPreviewClock";
@@ -172,6 +173,8 @@ NestRequest readInputs(const Ptr<CommandInputs>& inputs) {
         req.timeBudgetSeconds = s->value();
     if (Ptr<IntegerSpinnerCommandInput> s = inputs->itemById(kInWorkers))
         req.workers = s->value();
+    if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInVerbose))
+        req.verboseLog = b->value();
 
     return req;
 }
@@ -364,6 +367,9 @@ LaunchHandler g_launchHandler;
 /// Main thread, every ~150 ms while a solve runs.
 void onProgressTick() {
     ++g_tickCount;
+    // Before the early return: the trace is worth having even with no dialog
+    // open to show it to.
+    solverDrainKernelLog();
     if (!refreshResultDialog()) return;
 
     // The open question. doExecutePreview() is documented as being for commands
@@ -389,6 +395,9 @@ void onProgressTick() {
 /// Main thread, once, however the solve ended.
 void reportCompletion() {
     g_solveFinished = true;
+    // The tail of the trace: the ticker has already stopped, so the lines from
+    // the final cycle and the phase summaries are still sitting in the buffer.
+    solverDrainKernelLog();
 
     const int rc = solverReturnCode();
     if (rc != 0) {
@@ -484,6 +493,9 @@ class ExecuteHandler : public CommandEventHandler {
         }
 
         g_solveFinished = false;
+        // 4 = debug, 3 = info. Set before the solve so the import and the first
+        // cycle are already covered.
+        solverSetLogLevel(req.verboseLog ? 4 : 3);
         std::string startError;
         if (!solverStart(input.json, req.timeBudgetSeconds, req.workers, startError)) {
             logLine("solverStart failed: " + startError);
@@ -569,6 +581,7 @@ class CreatedHandler : public CommandCreatedEventHandler {
         // all cores measured faster, but the efficiency cores make a poor
         // default for a latency-sensitive interactive run.
         inputs->addIntegerSpinnerCommandInput(kInWorkers, "Workers", 1, 64, 1, 4);
+        inputs->addBoolValueInput(kInVerbose, "Verbose log", true, "", false);
 
         cmd->validateInputs()->add(&validate_);
         cmd->execute()->add(&execute_);

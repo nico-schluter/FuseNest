@@ -17,6 +17,11 @@ crate-type = ["staticlib"]
 sparrow = { git = "https://github.com/JeroenGar/sparrow", rev = "6f7b9d353c2b2a4fc68454590a2e8e83475c12ef" }
 jagua-rs = { version = "=1.1.0", features = ["spp"] }
 serde_json = "1.0"
+# sparrow narrates its own search through `log` -- every shrink, every failed
+# separation, every compression attempt. A GUI process has no stderr, so those
+# lines went nowhere; this crate lets us install a sink and forward them to the
+# add-in's log file instead of reinventing the instrumentation.
+log = "0.4"
 rand = "0.10"
 
 [profile.release]

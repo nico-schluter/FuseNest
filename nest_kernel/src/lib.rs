@@ -16,9 +16,13 @@ use rand::SeedableRng;
 use rand::rngs::Xoshiro256PlusPlus;
 use sparrow::config::DEFAULT_SPARROW_CONFIG;
 use sparrow::optimizer::optimize;
-use sparrow::util::listener::{OptimizationPhase, ReportType, SeparationProgress, SolutionListener};
+use sparrow::util::listener::{
+    OptimizationPhase, ReportType, SeparationProgress, SeparationResult, SolutionListener,
+};
 use sparrow::util::terminator::Terminator;
 
+use log::{LevelFilter, Log, Metadata, Record};
+use std::collections::VecDeque;
 use std::ffi::{CStr, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
@@ -98,6 +102,57 @@ fn store(slot: &Mutex<String>, value: String) {
     }
 }
 
+// --- log capture --------------------------------------------------------
+// sparrow already narrates its own search: explore.rs alone has nine info!
+// sites covering every shrink, every failed separation and every pool
+// rollback. That is exactly the cycle-by-cycle trace needed to understand why
+// a solve does or does not converge, and it was being discarded because a GUI
+// process has no stderr. Capture it into a ring buffer the main thread drains.
+
+/// Bounded so a long solve cannot grow this without limit if nobody drains.
+/// At info level a cycle produces a handful of lines, so this is many minutes
+/// of history.
+const LOG_CAP: usize = 8192;
+
+static LOG_LINES: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+fn push_log(line: String) {
+    if let Ok(mut g) = LOG_LINES.lock() {
+        if g.len() >= LOG_CAP {
+            g.pop_front();
+        }
+        g.push_back(line);
+    }
+}
+
+struct FfiLogger;
+
+impl Log for FfiLogger {
+    fn enabled(&self, _metadata: &Metadata) -> bool {
+        // Level filtering is done by `log` itself via set_max_level, so there
+        // is nothing to decide here.
+        true
+    }
+
+    fn log(&self, record: &Record) {
+        push_log(format!("{}", record.args()));
+    }
+
+    fn flush(&self) {}
+}
+
+static LOGGER: FfiLogger = FfiLogger;
+
+/// set_logger can only succeed once per process image, so failure here means a
+/// previous install is still in place -- which is fine, it is this same one.
+fn install_logger() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = log::set_logger(&LOGGER);
+        log::set_max_level(LevelFilter::Info);
+    });
+}
+
 /// Fusion is a GUI process with no stderr, so Rust's default panic output goes
 /// nowhere. Capture it instead and let C++ pull it into the log.
 fn install_panic_hook() {
@@ -112,9 +167,18 @@ fn install_panic_hook() {
 struct FfiListener;
 
 impl SolutionListener for FfiListener {
-    fn report(&mut self, _r: ReportType, s: &jagua_rs::probs::spp::entities::SPSolution) {
+    fn report(&mut self, r: ReportType, s: &jagua_rs::probs::spp::entities::SPSolution) {
         set_f32(&DENSITY_BITS, s.density());
         set_f32(&STRIP_WIDTH_BITS, s.strip_width());
+        // Which ReportType a solution arrives under is the difference between a
+        // layout that can be previewed and one with items still overlapping, so
+        // it is worth seeing in the trace.
+        push_log(format!(
+            "[SOL] {:?}: width {:.3}, density {:.2}%",
+            r,
+            s.strip_width(),
+            s.density() * 100.0
+        ));
     }
 
     fn report_phase(&mut self, phase: OptimizationPhase) {
@@ -125,6 +189,19 @@ impl SolutionListener for FfiListener {
             },
             Ordering::Relaxed,
         );
+    }
+
+    /// Once per separate() call -- one cycle. sparrow logs the decision that
+    /// follows but not the effort it took to get there.
+    fn report_separation_result(&mut self, r: SeparationResult) {
+        push_log(format!(
+            "[SEP] {} after {} iters in {:.2}s ({} evals, {} moves)",
+            if r.success { "separated" } else { "FAILED" },
+            r.iterations,
+            r.elapsed_seconds,
+            r.total_evals,
+            r.total_moves
+        ));
     }
 
     fn report_separation_progress(&mut self, p: SeparationProgress) {
@@ -162,21 +239,61 @@ impl Terminator for FfiTerminator {
     }
 }
 
-fn run_nest(input_json: &str, time_limit_ms: u64, n_workers: u32, seed: u64) -> Result<String, String> {
+/// What a caller may tune about a solve.
+///
+/// This exists because sparrow's shipped defaults are calibrated for a NINE
+/// MINUTE benchmark run -- `DEFAULT_SPARROW_CONFIG.expl_cfg.time_limit` is
+/// 9*60s -- and an interactive nest gets seconds. The step size is the one that
+/// matters most: at the default 0.1% per cycle, a 7.5s exploration buys about
+/// 146 shrinks, or 13% total reduction, which is why a solve that has found a
+/// good layout still looks like it is going nowhere.
+#[derive(Debug, Clone, Copy)]
+pub struct NkTuning {
+    /// Ceiling, not a target. Termination should come from convergence.
+    pub time_limit_ms: u64,
+    pub n_workers: u32,
+    pub seed: u64,
+    /// Fraction the strip shrinks after each successful separation.
+    pub shrink_step: f32,
+    /// Consecutive failed separations at a width before exploration gives up.
+    /// This is what "converged" means: the search has stopped finding room.
+    pub max_conseq_failed_attempts: usize,
+    /// Share of the budget given to exploration; the rest goes to compression.
+    pub exploration_share: f32,
+}
+
+impl Default for NkTuning {
+    fn default() -> Self {
+        Self {
+            time_limit_ms: 60_000,
+            n_workers: 4,
+            seed: 0xC0FFEE,
+            shrink_step: DEFAULT_SPARROW_CONFIG.expl_cfg.shrink_step,
+            max_conseq_failed_attempts: usize::MAX,
+            exploration_share: 0.75,
+        }
+    }
+}
+
+fn run_nest(input_json: &str, tuning: &NkTuning) -> Result<String, String> {
     let ext: ExtSPInstance =
         serde_json::from_str(input_json).map_err(|e| format!("input JSON: {e}"))?;
 
     let mut cfg = DEFAULT_SPARROW_CONFIG;
 
-    // Split the budget between sparrow's two phases, 3:1 exploration to
-    // compression, mirroring the proportions of the shipped defaults.
-    let total = Duration::from_millis(time_limit_ms.max(200));
-    cfg.expl_cfg.time_limit = total.mul_f32(0.75);
-    cfg.cmpr_cfg.time_limit = total.mul_f32(0.25);
+    let total = Duration::from_millis(tuning.time_limit_ms.max(200));
+    cfg.expl_cfg.time_limit = total.mul_f32(tuning.exploration_share);
+    cfg.cmpr_cfg.time_limit = total.mul_f32(1.0 - tuning.exploration_share);
 
-    if n_workers > 0 {
-        cfg.expl_cfg.separator_config.n_workers = n_workers as usize;
-        cfg.cmpr_cfg.separator_config.n_workers = n_workers as usize;
+    cfg.expl_cfg.shrink_step = tuning.shrink_step;
+    cfg.expl_cfg.max_conseq_failed_attempts = match tuning.max_conseq_failed_attempts {
+        usize::MAX => None,
+        n => Some(n),
+    };
+
+    if tuning.n_workers > 0 {
+        cfg.expl_cfg.separator_config.n_workers = tuning.n_workers as usize;
+        cfg.cmpr_cfg.separator_config.n_workers = tuning.n_workers as usize;
     }
 
     let importer = Importer::new(
@@ -189,7 +306,7 @@ fn run_nest(input_json: &str, time_limit_ms: u64, n_workers: u32, seed: u64) -> 
 
     let solution = optimize(
         instance,
-        Xoshiro256PlusPlus::seed_from_u64(seed),
+        Xoshiro256PlusPlus::seed_from_u64(tuning.seed),
         &mut FfiListener,
         &mut FfiTerminator { timeout: None },
         &cfg.expl_cfg,
@@ -231,6 +348,7 @@ pub extern "C" fn nk_nest(
     seed: u64,
 ) -> i32 {
     install_panic_hook();
+    install_logger();
 
     #[cfg(target_os = "macos")]
     unsafe {
@@ -262,9 +380,13 @@ pub extern "C" fn nk_nest(
     }
     RUNNING.store(true, Ordering::Relaxed);
 
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        run_nest(input, time_limit_ms, n_workers, seed)
-    }));
+    let tuning = NkTuning {
+        time_limit_ms,
+        n_workers,
+        seed,
+        ..NkTuning::default()
+    };
+    let outcome = catch_unwind(AssertUnwindSafe(|| run_nest(input, &tuning)));
 
     RUNNING.store(false, Ordering::Relaxed);
     PHASE.store(0, Ordering::Relaxed);
@@ -361,6 +483,66 @@ pub extern "C" fn nk_result_copy(buf: *mut u8, len: usize) -> usize {
     copy_out(&RESULT, buf, len)
 }
 
+/// Sets how much detail reaches the log. Info is the cycle-by-cycle narrative;
+/// Debug adds sparrow's per-iteration separator chatter, which is far heavier.
+/// 0 off, 1 error, 2 warn, 3 info, 4 debug, 5 trace.
+#[unsafe(no_mangle)]
+pub extern "C" fn nk_log_set_level(level: u32) {
+    install_logger();
+    log::set_max_level(match level {
+        0 => LevelFilter::Off,
+        1 => LevelFilter::Error,
+        2 => LevelFilter::Warn,
+        4 => LevelFilter::Debug,
+        5 => LevelFilter::Trace,
+        _ => LevelFilter::Info,
+    });
+}
+
+/// Drains captured log lines into `buf` as newline-terminated text. Returns
+/// bytes written, 0 when there is nothing left. Writes only whole lines, except
+/// for a single line too long to ever fit, which is truncated so a caller
+/// looping until 0 always makes progress.
+#[unsafe(no_mangle)]
+pub extern "C" fn nk_log_drain(buf: *mut u8, len: usize) -> usize {
+    if buf.is_null() || len == 0 {
+        return 0;
+    }
+    let Ok(mut lines) = LOG_LINES.lock() else {
+        return 0;
+    };
+
+    let mut written = 0usize;
+    while let Some(line) = lines.front() {
+        let needed = line.len() + 1;
+        if written + needed > len {
+            if written > 0 {
+                break; // come back for this one on the next call
+            }
+            // Single oversized line: truncate at a char boundary rather than
+            // stalling forever.
+            let mut cut = len - 1;
+            while cut > 0 && !line.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let bytes = &line.as_bytes()[..cut];
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, cut);
+                *buf.add(cut) = b'\n';
+            }
+            lines.pop_front();
+            return cut + 1;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(line.as_ptr(), buf.add(written), line.len());
+            *buf.add(written + line.len()) = b'\n';
+        }
+        written += needed;
+        lines.pop_front();
+    }
+    written
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn nk_last_error(buf: *mut u8, len: usize) -> usize {
     copy_out(&ERROR, buf, len)
@@ -369,4 +551,93 @@ pub extern "C" fn nk_last_error(buf: *mut u8, len: usize) -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn nk_last_panic(buf: *mut u8, len: usize) -> usize {
     copy_out(&LAST_PANIC, buf, len)
+}
+
+// --- offline harness ----------------------------------------------------
+// Reproducing a solve outside Fusion is the only way to study convergence
+// without a GUI in the loop. Not compiled into the shipped staticlib.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+
+    fn drain_to_stdout() {
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = nk_log_drain(buf.as_mut_ptr(), buf.len());
+            if n == 0 {
+                return;
+            }
+            print!("{}", String::from_utf8_lossy(&buf[..n]));
+        }
+    }
+
+    /// cargo test --release -- --nocapture trace
+    /// FUSENEST_INSTANCE / FUSENEST_BUDGET_MS / FUSENEST_LEVEL override defaults.
+    #[test]
+    fn trace() {
+        let path = std::env::var("FUSENEST_INSTANCE")
+            .unwrap_or_else(|_| "../fusenest_instance.json".into());
+        let budget: u64 = std::env::var("FUSENEST_BUDGET_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10_000);
+        let level: u32 = std::env::var("FUSENEST_LEVEL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3);
+
+        let json = std::fs::read_to_string(&path).expect("instance json");
+
+        let env_f32 = |k: &str, d: f32| -> f32 {
+            std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d)
+        };
+        let tuning = NkTuning {
+            time_limit_ms: budget,
+            shrink_step: env_f32("FUSENEST_SHRINK", NkTuning::default().shrink_step),
+            max_conseq_failed_attempts: std::env::var("FUSENEST_STAGNATION")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(usize::MAX),
+            exploration_share: env_f32("FUSENEST_EXPL_SHARE", 0.75),
+            ..NkTuning::default()
+        };
+
+        nk_log_set_level(level);
+        install_panic_hook();
+        println!("--- {path}, level {level}, {tuning:?} ---");
+
+        RUNNING.store(true, Ordering::Relaxed);
+        CANCEL.store(false, Ordering::Relaxed);
+        SEPARATIONS.store(0, Ordering::Relaxed);
+        let t0 = std::time::Instant::now();
+        let result = run_nest(&json, &tuning);
+        let elapsed = t0.elapsed();
+        RUNNING.store(false, Ordering::Relaxed);
+        let rc = if result.is_ok() { 0 } else { -3 };
+        if let Err(e) = &result {
+            println!("ERROR: {e}");
+        }
+
+        drain_to_stdout();
+
+        let mut p = NkProgress {
+            phase: 0,
+            iteration: 0,
+            separations: 0,
+            density: 0.0,
+            strip_width: 0.0,
+            running: 0,
+            cancelled: 0,
+        };
+        nk_progress(&mut p);
+        println!(
+            "=== rc {rc}  {:.2}s wall  density {:.2}%  width {:.3}  {} separations ===",
+            elapsed.as_secs_f32(),
+            p.density * 100.0,
+            p.strip_width,
+            p.separations
+        );
+        assert_eq!(rc, 0, "solve failed");
+    }
 }

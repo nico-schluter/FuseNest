@@ -25,6 +25,9 @@ struct NestRequest {
     RotationMode rotation = RotationMode::Half;
     int timeBudgetSeconds = 10;
     int workers = 4;
+    /// Raises the kernel's log level from info to debug. Info already covers
+    /// every cycle; debug adds sparrow's per-iteration separator output.
+    bool verboseLog = false;
 
     std::string describe() const;
 };
