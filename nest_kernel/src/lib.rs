@@ -14,7 +14,7 @@ use jagua_rs::io::import::Importer;
 use jagua_rs::probs::spp::io::ext_repr::ExtSPInstance;
 use rand::SeedableRng;
 use rand::rngs::Xoshiro256PlusPlus;
-use sparrow::config::DEFAULT_SPARROW_CONFIG;
+use sparrow::config::{DEFAULT_SPARROW_CONFIG, ShrinkDecayStrategy};
 use sparrow::optimizer::optimize;
 use sparrow::util::listener::{
     OptimizationPhase, ReportType, SeparationProgress, SeparationResult, SolutionListener,
@@ -257,7 +257,16 @@ pub struct NkTuning {
     pub shrink_step: f32,
     /// Consecutive failed separations at a width before exploration gives up.
     /// This is what "converged" means: the search has stopped finding room.
+    ///
+    /// Measured on an 8-part instance: 3, 5 and 10 all reach an identical
+    /// 61.894mm, but exploration takes 20.4s, 27.4s and 41.2s respectively, so
+    /// everything above 3 is pure waiting. 2 gives up early at 63.398mm, which
+    /// is measurably worse. Hence 3.
     pub max_conseq_failed_attempts: usize,
+    /// Rate at which the compression step decays per failed attempt. Compression
+    /// terminates once the step decays below sparrow's floor, which is what
+    /// makes it convergence-bound rather than clock-bound.
+    pub compression_decay: f32,
     /// Share of the budget given to exploration; the rest goes to compression.
     pub exploration_share: f32,
 }
@@ -269,7 +278,8 @@ impl Default for NkTuning {
             n_workers: 4,
             seed: 0xC0FFEE,
             shrink_step: DEFAULT_SPARROW_CONFIG.expl_cfg.shrink_step,
-            max_conseq_failed_attempts: usize::MAX,
+            max_conseq_failed_attempts: 3,
+            compression_decay: 0.5,
             exploration_share: 0.75,
         }
     }
@@ -290,6 +300,15 @@ fn run_nest(input_json: &str, tuning: &NkTuning) -> Result<String, String> {
         usize::MAX => None,
         n => Some(n),
     };
+
+    // sparrow ships TimeBased decay, which derives the shrink step from
+    // elapsed/time_limit. That makes compression purely clock-bound: it
+    // succeeds trivially at microscopic steps -- the trace shows "success at
+    // 0.004%" with zero evals and zero moves -- until its allowance runs out.
+    // Worse, with no wall-clock budget at all the ratio grows without bound and
+    // the loop's step >= floor guard never trips. FailureBased decays on failed
+    // attempts instead, so compression stops when it stops making progress.
+    cfg.cmpr_cfg.shrink_decay = ShrinkDecayStrategy::FailureBased(tuning.compression_decay);
 
     if tuning.n_workers > 0 {
         cfg.expl_cfg.separator_config.n_workers = tuning.n_workers as usize;
@@ -598,7 +617,8 @@ mod tests {
             max_conseq_failed_attempts: std::env::var("FUSENEST_STAGNATION")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(usize::MAX),
+                .unwrap_or(NkTuning::default().max_conseq_failed_attempts),
+            compression_decay: env_f32("FUSENEST_CMPR_DECAY", NkTuning::default().compression_decay),
             exploration_share: env_f32("FUSENEST_EXPL_SHARE", 0.75),
             ..NkTuning::default()
         };
