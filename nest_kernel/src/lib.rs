@@ -737,6 +737,109 @@ mod tests {
         );
     }
 
+    /// How much of the published stream is actually visible? The viewport
+    /// churned while nothing appeared to change, so measure the gap between
+    /// "a new layout exists" and "a person could tell".
+    #[test]
+    fn visible_change_rate() {
+        const THRESHOLD_MM: f32 = 1.0;
+
+        let json = std::fs::read_to_string("../fusenest_instance.json").expect("instance json");
+        nk_log_set_level(0);
+
+        let stats = std::sync::Arc::new(std::sync::Mutex::new((
+            0usize,
+            0usize,
+            0usize,
+            Vec::<(f32, f32)>::new(),
+        )));
+        let watcher = {
+            let stats = stats.clone();
+            std::thread::spawn(move || {
+                let mut last_gen = 0u64;
+                let mut drawn: Vec<NkPlacement> = Vec::new();
+                let mut buf = vec![NkPlacement::default(); 8192];
+                while RUNNING.load(Ordering::Relaxed) || last_gen == 0 {
+                    let mut info = NkSnapshotInfo::default();
+                    let n = nk_snapshot_copy(buf.as_mut_ptr(), buf.len(), &mut info);
+                    if info.generation != last_gen && n > 0 {
+                        last_gen = info.generation;
+                        let fresh = &buf[..n];
+                        let mut s = stats.lock().unwrap();
+                        s.0 += 1; // published
+                        let max_move = if drawn.len() != n {
+                            f32::INFINITY
+                        } else {
+                            fresh
+                                .iter()
+                                .zip(drawn.iter())
+                                .map(|(f, d)| {
+                                    let dx = f.tx - d.tx;
+                                    let dy = f.ty - d.ty;
+                                    (dx * dx + dy * dy).sqrt()
+                                })
+                                .fold(0.0f32, f32::max)
+                        };
+                        s.3.push((max_move, info.strip_width));
+                        let visible = max_move >= THRESHOLD_MM;
+                        if visible {
+                            s.1 += 1; // would redraw
+                            drawn = fresh.to_vec();
+                        } else {
+                            s.2 += 1; // skipped as invisible
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            })
+        };
+
+        RUNNING.store(true, Ordering::Relaxed);
+        let tuning = NkTuning { time_limit_ms: 60_000, ..NkTuning::default() };
+        let out = run_nest(&json, &tuning);
+        RUNNING.store(false, Ordering::Relaxed);
+        watcher.join().unwrap();
+        assert!(out.is_ok(), "solve failed: {out:?}");
+
+        let guard = stats.lock().unwrap();
+        let (published, redraw, skipped, samples) = &*guard;
+        println!(
+            "sampled {published} layouts: {redraw} move a part >= {THRESHOLD_MM}mm, \
+             {skipped} invisible"
+        );
+
+        let moves: Vec<f32> = samples.iter().map(|(m, _)| *m).filter(|m| m.is_finite()).collect();
+        if !moves.is_empty() {
+            let mut sorted = moves.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!(
+                "  max part movement between consecutive layouts: median {:.1}mm, p90 {:.1}mm, max {:.1}mm",
+                sorted[sorted.len() / 2],
+                sorted[sorted.len() * 9 / 10],
+                sorted[sorted.len() - 1]
+            );
+        }
+
+        // How many redraws survive if the gate is on WIDTH improvement instead
+        // of part movement? Parts shuffle constantly during separation; the
+        // strip narrowing is the thing the user is actually waiting for.
+        let first = samples.first().map(|(_, w)| *w).unwrap_or(0.0);
+        let last = samples.last().map(|(_, w)| *w).unwrap_or(0.0);
+        println!("  width {first:.1} -> {last:.1}mm over the solve");
+        for pct in [0.1f32, 0.25, 0.5, 1.0] {
+            let mut drawn_w = f32::INFINITY;
+            let mut n = 0;
+            for (_, w) in samples.iter() {
+                if drawn_w.is_infinite() || (drawn_w - w) / drawn_w * 100.0 >= pct {
+                    drawn_w = *w;
+                    n += 1;
+                }
+            }
+            println!("  gate on >= {pct}% narrower: {n} redraws");
+        }
+        assert!(*published > 5, "expected a stream, saw {published}");
+    }
+
     /// cargo test --release -- --nocapture trace
     /// FUSENEST_INSTANCE / FUSENEST_BUDGET_MS / FUSENEST_LEVEL override defaults.
     #[test]

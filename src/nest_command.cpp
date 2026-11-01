@@ -9,6 +9,7 @@
 
 #include <Fusion/FusionAll.h>
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <sstream>
@@ -100,6 +101,31 @@ std::uint64_t g_previewedGeneration = 0;
 /// design; redrawing at that rate buys nothing a person can see.
 constexpr double kMinPreviewIntervalMs = 400.0;
 std::chrono::steady_clock::time_point g_lastPreviewAt{};
+
+/// How much narrower the strip must get before a redraw is worth it.
+///
+/// Gating on part movement was the obvious idea and it does not work: measured
+/// over a solve, the maximum distance a part moves between consecutive feasible
+/// layouts has a median of 107mm and a p90 of 261mm, on a strip 62mm wide. Only
+/// 1 layout in 29 was within a millimetre of its predecessor. Consecutive
+/// layouts are not refinements of each other -- exploration deliberately swaps
+/// large items and reshuffles -- so almost every one differs wildly while the
+/// width barely moves.
+///
+/// Which means the churn is not redundant drawing. It is an honest animation of
+/// a search that throws the layout in the air every cycle, and the only way to
+/// make it legible is to show less of it. Width is what the user is waiting for,
+/// so that is the gate: measured counts over one solve are 29 layouts published,
+/// 22 / 18 / 14 / 11 redraws at 0.1 / 0.25 / 0.5 / 1% thresholds.
+constexpr double kMinWidthImprovementPct = 0.5;
+
+/// Diagnostics for the open question: how many executePreview events does one
+/// clock toggle actually produce? Earlier numbers suggested about four, but
+/// doExecutePreview() was still in the picture then.
+long g_toggles = 0;
+long g_previewsSinceToggle = 0;
+long g_maxPreviewsPerToggle = 0;
+long g_skippedRedraws = 0;
 
 /// Set once a preview has claimed its result as the final one, so the execute
 /// handler knows not to apply the same placements a second time.
@@ -257,6 +283,7 @@ class ResultPreviewHandler : public CommandEventHandler {
         // Timeline grouping is skipped: these moves are about to be discarded,
         // and grouping them costs a timeline operation per preview. The preview
         // that OK keeps is regrouped by the execute path.
+        ++g_previewsSinceToggle;
         const WriteBackResult wb =
             applyPlacements(Application::get(), g_lastProfiles, g_shown, /*groupTimeline=*/false);
         if (wb.moved > 0) {
@@ -301,12 +328,12 @@ class ResultDestroyHandler : public CommandEventHandler {
     void notify(const Ptr<CommandEventArgs>& args) override {
         const CommandTerminationReason why =
             args ? args->terminationReason() : UnknownTerminationReason;
-        logLine(std::string("result dialog closed: ") + terminationLabel(why) +
-                " -- ticks " + std::to_string(g_tickCount) + ", previews " +
+        logLine(std::string("result dialog closed: ") + terminationLabel(why) + " -- ticks " +
+                std::to_string(g_tickCount) + ", redraws " + std::to_string(g_toggles) + ", " +
+                std::to_string(g_skippedRedraws) + " skipped as invisible, previews " +
                 std::to_string(g_previewCount) + " (" + std::to_string(g_previewApplied) +
-                " applied), validates " + std::to_string(g_validateCount) +
-                ", inputChanged " + std::to_string(g_inputChangedCount) + " (last: " +
-                (g_lastChangedId.empty() ? "none" : g_lastChangedId) + ")");
+                " applied, up to " + std::to_string(g_maxPreviewsPerToggle) +
+                " per redraw), inputChanged " + std::to_string(g_inputChangedCount));
 
         // Unconditional: a dialog that is gone has nobody left to show progress
         // to, so the engine has no reason to keep burning cores. On OK the
@@ -365,6 +392,7 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
         g_lastChangedId.clear();
         g_previewedGeneration = 0;
         g_lastPreviewAt = {};
+        g_toggles = g_previewsSinceToggle = g_maxPreviewsPerToggle = g_skippedRedraws = 0;
         g_shown.clear();
         g_shownInfo = NkSnapshotInfo{};
         // A solve may already have published layouts before this dialog opened.
@@ -409,6 +437,22 @@ LaunchHandler g_launchHandler;
 /// Fusion regenerates a preview in response to an input VALUE changing. A
 /// TextBoxCommandInput's formattedText is not one -- writing it fires no
 /// inputChanged at all -- so the hidden clock input is what carries the request.
+/// Whether redrawing `fresh` over what was last drawn is worth the cost.
+///
+/// Compared against the last DRAWN layout, not the last seen one, so a run of
+/// individually small improvements still accumulates into a redraw.
+bool worthRedrawing(const std::vector<NkPlacement>& shown, const NkSnapshotInfo& shownInfo,
+                    const std::vector<NkPlacement>& fresh, const NkSnapshotInfo& freshInfo) {
+    // A different number of placed parts is always worth showing, and is also
+    // the only case where comparing widths would be misleading.
+    if (shown.size() != fresh.size()) return true;
+    if (shownInfo.strip_width <= 0.0f) return true;
+
+    const double gainedPct =
+        (shownInfo.strip_width - freshInfo.strip_width) / shownInfo.strip_width * 100.0;
+    return gainedPct >= kMinWidthImprovementPct;
+}
+
 void maybeAdvancePreview() {
     if (!g_resultCmd) return;
 
@@ -418,18 +462,35 @@ void maybeAdvancePreview() {
     const auto now = std::chrono::steady_clock::now();
     const double sinceMs =
         std::chrono::duration<double, std::milli>(now - g_lastPreviewAt).count();
-    // Always let the final result through: it is the one the user acts on, and
-    // it arrives exactly once.
-    if (!g_solveFinished && sinceMs < kMinPreviewIntervalMs) return;
+    // The final result always goes through: it is the one the user acts on, it
+    // arrives exactly once, and the numbers beside it must match it exactly.
+    const bool force = g_solveFinished;
+    if (!force && sinceMs < kMinPreviewIntervalMs) return;
 
     NkSnapshotInfo info{};
     std::vector<NkPlacement> fresh;
     if (!solverSnapshot(fresh, info)) return;
 
+    // Examined, so do not examine it again -- but g_shown stays as the last
+    // layout actually drawn, which is what the next comparison must be against.
+    g_previewedGeneration = info.generation;
+
+    if (!force && !g_shown.empty() && !worthRedrawing(g_shown, g_shownInfo, fresh, info)) {
+        ++g_skippedRedraws;
+        // Deliberately does NOT update g_shownInfo: it describes the layout on
+        // screen, and the next comparison has to be against that layout's width
+        // or a long run of sub-threshold gains would never add up to a redraw.
+        // The progress line carries the sense of activity instead.
+        return;
+    }
+
     g_shown = std::move(fresh);
     g_shownInfo = info;
-    g_previewedGeneration = info.generation;
     g_lastPreviewAt = now;
+
+    g_maxPreviewsPerToggle = std::max(g_maxPreviewsPerToggle, g_previewsSinceToggle);
+    g_previewsSinceToggle = 0;
+    ++g_toggles;
 
     if (Ptr<CommandInputs> inputs = g_resultCmd->commandInputs())
         if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInPreviewClock))
@@ -452,9 +513,10 @@ void onProgressTick() {
 
     if (g_tickCount == 1 || g_tickCount % 40 == 0)
         logLine("tick " + std::to_string(g_tickCount) + ": gen " +
-                std::to_string(g_shownInfo.generation) + ", previews " +
-                std::to_string(g_previewCount) + " (" + std::to_string(g_previewApplied) +
-                " applied), validates " + std::to_string(g_validateCount));
+                std::to_string(g_shownInfo.generation) + ", redraws " +
+                std::to_string(g_toggles) + " (" + std::to_string(g_skippedRedraws) +
+                " skipped as invisible), previews " + std::to_string(g_previewCount) +
+                ", previews per redraw max " + std::to_string(g_maxPreviewsPerToggle));
 }
 
 /// Main thread, once, however the solve ended.
