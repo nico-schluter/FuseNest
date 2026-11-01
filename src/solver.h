@@ -5,6 +5,10 @@
 // doEvents() pumping is needed, and the result is marshalled back with a
 // Fusion CustomEvent -- the only legal way for a worker to reach the API.
 // Progress is read from atomics inside the kernel, never pushed by a callback.
+//
+// Two events come back, both on the main thread:
+//   onProgress  repeatedly while a solve runs, driven by a ticker thread
+//   onFinished  once, however the solve ended
 #pragma once
 
 #include "nest_kernel.h"
@@ -16,13 +20,15 @@
 
 namespace fusenest {
 
-/// Registers the completion CustomEvent. `onFinished` is invoked ON THE MAIN
-/// THREAD once a solve ends, however it ended.
+/// Registers the progress and completion CustomEvents. Both callbacks are
+/// invoked ON THE MAIN THREAD.
 ///
 /// Note: a modal dialog blocks delivery -- fireCustomEvent queues, and Fusion
-/// only drains the queue when the main thread returns to its event loop.
+/// only drains the queue when the main thread returns to its event loop. A
+/// command dialog is not modal in that sense, which is what makes a live
+/// progress readout possible at all.
 bool solverInit(const adsk::core::Ptr<adsk::core::Application>& app,
-                std::function<void()> onFinished);
+                std::function<void()> onProgress, std::function<void()> onFinished);
 
 /// Cancels, joins and unregisters. Must run before Fusion unloads the add-in:
 /// a thread outliving the image executes freed code.

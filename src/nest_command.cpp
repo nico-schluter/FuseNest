@@ -19,10 +19,17 @@ namespace fusenest {
 namespace {
 
 const char* kCmdId = "FuseNestCommand";
-// A second, dialog-free command exists purely so the write-back runs INSIDE a
-// command execute handler: Fusion has no undo-transaction API, and that is the
-// only thing it groups into a single undo step.
-const char* kApplyCmdId = "FuseNestApplyCommand";
+// The result command: opens as soon as a solve starts and stays open for its
+// duration, showing progress. OK applies the placements, Cancel discards them.
+// It being a command is not incidental -- Fusion has no undo-transaction API,
+// and a command's execute handler is the only thing it groups into one undo
+// step, so the write-back has to happen in here.
+const char* kResultCmdId = "FuseNestResultCommand";
+// Starting a command from inside another command's destroy handler is too
+// early; Fusion is still tearing the first one down. Hopping through a
+// CustomEvent defers the launch until the main thread is back in its event
+// loop and command 1 is really gone.
+const char* kLaunchEventId = "FuseNestLaunchResult";
 const char* kPanelId = "SolidScriptsAddinsPanel";
 
 // Fusion's internal length unit is centimetres, and ValueCommandInput::value()
@@ -38,13 +45,95 @@ const char* kInSpacing = "fnSpacing";
 const char* kInRotation = "fnRotation";
 const char* kInBudget = "fnBudget";
 const char* kInWorkers = "fnWorkers";
+const char* kInStatus = "fnStatus";
+const char* kInJob = "fnJob";
 
 Ptr<CommandDefinition> g_cmdDef;
-Ptr<CommandDefinition> g_applyDef;
+Ptr<CommandDefinition> g_resultDef;
+Ptr<CustomEvent> g_launchEvent;
 
 /// The profiles the last solve was built from. Placement item_ids index into
 /// this, so it has to outlive the command that produced it.
 std::vector<Profile> g_lastProfiles;
+
+/// What command 1 found, so the result dialog can show it instead of the
+/// message box that used to carry it.
+std::string g_jobSummary;
+
+/// The live result command, while one is open. A CustomEvent handler gets no
+/// Command pointer and ui->activeCommand() yields only an id string, so the
+/// only way to reach the open dialog is to stash it here on creation. Cleared
+/// in the destroy handler: calling into a destroyed command is undefined.
+Ptr<Command> g_resultCmd;
+
+bool g_launchPending = false;
+bool g_solveFinished = false;
+
+// Diagnostics for the one open question in this design: what actually makes
+// Fusion re-run executePreview on a dialog whose inputs the user is not
+// touching. Counted rather than logged per-event -- at a 150 ms tick a short
+// solve produces a hundred of each.
+long g_tickCount = 0;
+long g_previewCount = 0;
+long g_validateCount = 0;
+
+const char* phaseLabel(std::uint32_t phase) {
+    switch (phase) {
+        case 1: return "Exploring";
+        case 2: return "Compressing";
+        default: return "Idle";
+    }
+}
+
+const char* terminationLabel(CommandTerminationReason why) {
+    switch (why) {
+        case CompletedTerminationReason: return "completed (OK)";
+        case CancelledTerminationReason: return "cancelled";
+        case AbortedTerminationReason: return "aborted (OK, execute failed)";
+        case PreEmptedTerminationReason: return "pre-empted by another command";
+        case SessionEndingTerminationReason: return "session ending";
+        default: return "unknown";
+    }
+}
+
+/// Whether there is a result worth applying. Until partial results stream out
+/// of the kernel this is simply "the solve ran to completion".
+bool haveApplicableResult() {
+    return g_solveFinished && solverReturnCode() == 0 && !g_lastProfiles.empty();
+}
+
+std::string statusText() {
+    NkProgress p{};
+    const bool have = solverProgress(p);
+
+    std::ostringstream os;
+    if (!g_solveFinished) {
+        os << "<b>" << (have ? phaseLabel(p.phase) : "Starting") << "</b><br/>";
+    } else if (solverReturnCode() != 0) {
+        os << "<b>Failed</b> (rc " << solverReturnCode() << ")<br/>" << solverLastError();
+        return os.str();
+    } else {
+        os << "<b>Finished</b> in " << static_cast<long>(solverElapsedMs()) << " ms<br/>";
+    }
+
+    if (have) {
+        os << "density " << static_cast<int>(p.density * 100.0) << " % &middot; width "
+           << static_cast<long>(p.strip_width) << " mm<br/>"
+           << "separations " << p.separations << " &middot; iteration " << p.iteration;
+    }
+    return os.str();
+}
+
+/// Pushes the current status into the open result dialog, if there is one.
+/// Returns whether a dialog was there to update.
+bool refreshResultDialog() {
+    if (!g_resultCmd) return false;
+    Ptr<CommandInputs> inputs = g_resultCmd->commandInputs();
+    if (!inputs) return false;
+    if (Ptr<TextBoxCommandInput> tb = inputs->itemById(kInStatus))
+        tb->formattedText(statusText());
+    return true;
+}
 
 RotationMode rotationFromIndex(int index) {
     switch (index) {
@@ -79,96 +168,178 @@ NestRequest readInputs(const Ptr<CommandInputs>& inputs) {
     return req;
 }
 
-/// Does the actual model change. Running here, inside a command execute, is
-/// what makes the whole write-back a single undo step.
-class ApplyExecuteHandler : public CommandEventHandler {
+// --- the result command --------------------------------------------------
+
+/// OK. Does the actual model change; running inside a command execute is what
+/// makes the whole write-back a single undo step.
+class ResultExecuteHandler : public CommandEventHandler {
   public:
     void notify(const Ptr<CommandEventArgs>& /*args*/) override {
         Ptr<Application> app = Application::get();
         Ptr<UserInterface> ui = app ? app->userInterface() : nullptr;
 
         const WriteBackResult wb = applyPlacements(app, g_lastProfiles);
+        logLine("applied: " + std::to_string(wb.moved) + " moved, " +
+                std::to_string(wb.skipped) + " skipped");
+        for (const auto& w : wb.warnings) logLine("writeback warning: " + w);
 
-        NkProgress p{};
-        solverProgress(p);
-
-        std::ostringstream os;
-        os << "density:      " << p.density * 100.0 << " %\n"
-           << "strip width:  " << p.strip_width << " mm\n"
-           << "wall:         " << solverElapsedMs() << " ms\n"
-           << "\nmoved:        " << wb.moved << " bodies\n";
-        if (wb.skipped) os << "skipped:      " << wb.skipped << "\n";
-        if (wb.grouped) os << "timeline:     grouped into one entry\n";
-        if (!wb.warnings.empty()) {
-            os << "\nwarnings:\n";
-            for (const auto& w : wb.warnings) {
-                os << "  - " << w << "\n";
-                logLine("writeback warning: " + w);
-            }
+        if (!wb.warnings.empty() && ui) {
+            std::ostringstream os;
+            os << "Applied " << wb.moved << " of " << (wb.moved + wb.skipped) << " parts.\n\n";
+            for (const auto& w : wb.warnings) os << "  - " << w << "\n";
+            ui->messageBox(os.str(), "FuseNest");
         }
-        os << "\nLog: " << logPath();
-        if (ui) ui->messageBox(os.str(), "FuseNest");
     }
 };
 
-class ApplyCreatedHandler : public CommandCreatedEventHandler {
+/// Fires whenever Fusion decides the preview should be regenerated. Right now
+/// it only counts itself: proving what triggers it is the point of this step.
+class ResultPreviewHandler : public CommandEventHandler {
+  public:
+    void notify(const Ptr<CommandEventArgs>& args) override {
+        ++g_previewCount;
+        // The placements are not previewed yet, so nothing here is reusable as
+        // the final result. Once it is, this becomes true and OK gets the
+        // preview's transforms for free instead of re-running the write-back.
+        if (args) args->isValidResult(false);
+    }
+};
+
+class ResultValidateHandler : public ValidateInputsEventHandler {
+  public:
+    void notify(const Ptr<ValidateInputsEventArgs>& args) override {
+        ++g_validateCount;
+        if (args) args->areInputsValid(haveApplicableResult());
+    }
+};
+
+class ResultDestroyHandler : public CommandEventHandler {
+  public:
+    void notify(const Ptr<CommandEventArgs>& args) override {
+        const CommandTerminationReason why =
+            args ? args->terminationReason() : UnknownTerminationReason;
+        logLine(std::string("result dialog closed: ") + terminationLabel(why) +
+                " -- ticks " + std::to_string(g_tickCount) + ", previews " +
+                std::to_string(g_previewCount) + ", validates " +
+                std::to_string(g_validateCount));
+
+        // Unconditional: a dialog that is gone has nobody left to show progress
+        // to, so the engine has no reason to keep burning cores. On OK the
+        // solve has already finished and this is a no-op.
+        solverCancel();
+        g_resultCmd = nullptr;
+    }
+};
+
+class ResultCreatedHandler : public CommandCreatedEventHandler {
   public:
     void notify(const Ptr<CommandCreatedEventArgs>& args) override {
         Ptr<Command> cmd = args ? args->command() : nullptr;
-        if (!cmd) return;
-        // No inputs and no dialog: fire straight through to execute.
-        cmd->isAutoExecute(true);
+        if (!cmd) {
+            logLine("result commandCreated: command() was null");
+            return;
+        }
+
+        cmd->okButtonText("Apply");
+        cmd->cancelButtonText("Discard");
         cmd->isRepeatable(false);
+        // Critical: if another command pre-empts this dialog, terminate rather
+        // than silently executing. Moving the user's bodies because they
+        // reached for a different tool would be indefensible.
+        cmd->isExecutedWhenPreEmpted(false);
+
+        Ptr<CommandInputs> inputs = cmd->commandInputs();
+        if (!inputs) {
+            logLine("result commandCreated: commandInputs() was null");
+            return;
+        }
+
+        inputs->addTextBoxCommandInput(kInStatus, "", statusText(), 3, true);
+        if (!g_jobSummary.empty())
+            inputs->addTextBoxCommandInput(kInJob, "", g_jobSummary, 6, true);
+
+        cmd->validateInputs()->add(&validate_);
+        cmd->executePreview()->add(&preview_);
         cmd->execute()->add(&execute_);
+        cmd->destroy()->add(&destroy_);
+
+        g_resultCmd = cmd;
+        g_tickCount = g_previewCount = g_validateCount = 0;
+        logLine("result dialog open");
     }
 
   private:
-    ApplyExecuteHandler execute_;
+    ResultValidateHandler validate_;
+    ResultPreviewHandler preview_;
+    ResultExecuteHandler execute_;
+    ResultDestroyHandler destroy_;
 };
 
-ApplyCreatedHandler g_applyCreatedHandler;
+ResultCreatedHandler g_resultCreatedHandler;
 
-/// Runs on the main thread once a solve ends, delivered by CustomEvent.
+/// Opens the result dialog, one event-loop turn after command 1 has gone.
+class LaunchHandler : public CustomEventHandler {
+  public:
+    void notify(const Ptr<CustomEventArgs>& /*args*/) override {
+        if (!g_resultDef) return;
+        if (!g_resultDef->execute()) {
+            std::string err;
+            if (Ptr<Application> app = Application::get()) app->getLastError(&err);
+            logLine("result command failed to start: " + err);
+            // Without a dialog there is nothing to show progress to or accept
+            // from, so the solve is pointless.
+            solverCancel();
+        }
+    }
+};
+
+LaunchHandler g_launchHandler;
+
+// --- engine callbacks ----------------------------------------------------
+
+/// Main thread, every ~150 ms while a solve runs.
+void onProgressTick() {
+    ++g_tickCount;
+    if (!refreshResultDialog()) return;
+
+    // The open question. doExecutePreview() is documented as being for commands
+    // with no dialog, with "changing command inputs" named as the normal
+    // trigger -- and we are changing one just above. Call it anyway and count
+    // what arrives; the log says which of the two is doing the work.
+    const bool asked = g_resultCmd->doExecutePreview();
+    if (g_tickCount == 1 || g_tickCount % 20 == 0)
+        logLine("tick " + std::to_string(g_tickCount) + ": doExecutePreview -> " +
+                (asked ? "true" : "false") + ", previews so far " +
+                std::to_string(g_previewCount) + ", validates " +
+                std::to_string(g_validateCount));
+}
+
+/// Main thread, once, however the solve ended.
 void reportCompletion() {
-    Ptr<Application> app = Application::get();
-    Ptr<UserInterface> ui = app ? app->userInterface() : nullptr;
+    g_solveFinished = true;
 
     const int rc = solverReturnCode();
-    std::ostringstream os;
-
     if (rc != 0) {
-        os << "Nesting failed (rc " << rc << ")\n\n" << solverLastError();
-        logLine(os.str());
-        if (ui) ui->messageBox(os.str(), "FuseNest");
-        return;
-    }
-
-    const std::string json = solverResultJson();
-    const std::string path = std::string(outputDir()) + "/fusenest_solution.json";
-    {
-        std::ofstream f(path);
-        if (f) f << json;
-    }
-
-    logLine("solve complete: " + json);
-
-    // Autodesk's own threading guidance: end any active command before making
-    // changes that add undo operations. Then run the write-back as a command,
-    // so Fusion treats it as one undo step.
-    if (ui) {
-        if (Ptr<CommandDefinition> sel = ui->commandDefinitions()->itemById("SelectCommand"))
-            sel->execute();
-        if (g_applyDef && !g_applyDef->execute()) {
-            std::string err;
-            app->getLastError(&err);
-            logLine("apply command failed to start: " + err);
-            ui->messageBox("Solve finished but the write-back could not start:\n" + err,
-                           "FuseNest");
+        logLine("solve failed (rc " + std::to_string(rc) + "): " + solverLastError());
+    } else {
+        const std::string json = solverResultJson();
+        const std::string path = std::string(outputDir()) + "/fusenest_solution.json";
+        {
+            std::ofstream f(path);
+            if (f) f << json;
         }
+        logLine("solve complete in " + std::to_string(static_cast<long>(solverElapsedMs())) +
+                " ms, " + std::to_string(nk_placement_count()) + " placements");
+    }
+
+    if (!refreshResultDialog()) {
+        // The user closed the dialog before the engine noticed the cancel.
+        // Nothing to report to; the result is simply dropped.
+        logLine("solve finished with no result dialog open -- result discarded");
     }
 }
 
-// --- handlers ------------------------------------------------------------
+// --- the setup command ---------------------------------------------------
 // Fusion stores a RAW POINTER to every handler. A stack-allocated handler dies
 // when the creating function returns and Fusion then calls into freed memory,
 // so all of these are file-scope statics with lifetimes longer than the events
@@ -199,25 +370,6 @@ class ExecuteHandler : public CommandEventHandler {
             totalPoints += p.outer.size();
         }
 
-        std::ostringstream os;
-        os << req.describe() << "\n"
-           << "bodies:       " << extracted.bodiesExamined << "\n"
-           << "profiles:     " << extracted.profiles.size() << "\n"
-           << "outer points: " << totalPoints << "\n"
-           << "total area:   " << totalAreaMm2 << " mm2\n"
-           << "holes found:  " << extracted.holesDropped
-           << " (captured, but a sparrow item cannot carry them)\n"
-           << "approximated: " << approximated << " of " << extracted.profiles.size()
-           << " silhouettes\n";
-
-        if (!extracted.warnings.empty()) {
-            os << "\nwarnings:\n";
-            for (const auto& w : extracted.warnings) {
-                os << "  - " << w << "\n";
-                logLine("warning: " + w);
-            }
-        }
-
         g_lastProfiles = extracted.profiles;
         const SolverInput input = buildSolverInput(req, extracted.profiles, "fusenest");
         const std::string instancePath = std::string(outputDir()) + "/fusenest_instance.json";
@@ -228,31 +380,55 @@ class ExecuteHandler : public CommandEventHandler {
         logLine("wrote solver input: " + instancePath + " (" + std::to_string(input.json.size()) +
                 " bytes, " + std::to_string(input.itemCount) + " items)");
 
-        os << "\nsolver input:\n"
-           << "  items:      " << input.itemCount << "\n"
-           << "  bytes:      " << input.json.size() << "\n"
-           << "  holes lost: " << input.holesDropped << "\n";
+        // Everything command 1 learned, carried into the result dialog rather
+        // than thrown at a message box the user has to dismiss before working.
+        std::ostringstream job;
+        job << "<b>" << input.itemCount << " parts</b> from " << extracted.bodiesExamined
+            << " bodies &middot; " << totalPoints << " points<br/>"
+            << static_cast<long>(totalAreaMm2) << " mm&sup2; total";
+        if (approximated)
+            job << "<br/>" << approximated << " of " << extracted.profiles.size()
+                << " silhouettes approximated";
+        if (extracted.holesDropped)
+            job << "<br/>" << extracted.holesDropped << " holes dropped (a sparrow item "
+                << "cannot carry them)";
+        for (const auto& w : extracted.warnings) {
+            job << "<br/>warning: " << w;
+            logLine("warning: " + w);
+        }
+        g_jobSummary = job.str();
 
         if (input.itemCount == 0) {
-            os << "\nNothing to nest.";
-            if (ui) ui->messageBox(os.str(), "FuseNest");
+            if (ui)
+                ui->messageBox(std::string("Nothing to nest.\n\nLog: ") + logPath(),
+                               "FuseNest");
             return;
         }
 
+        g_solveFinished = false;
         std::string startError;
         if (!solverStart(input.json, req.timeBudgetSeconds, req.workers, startError)) {
-            os << "\ncould not start: " << startError;
             logLine("solverStart failed: " + startError);
-            if (ui) ui->messageBox(os.str(), "FuseNest");
+            if (ui)
+                ui->messageBox("Could not start nesting:\n" + startError + "\n\nLog: " + logPath(),
+                               "FuseNest");
             return;
         }
+        logLine("solve started: " + std::to_string(input.itemCount) + " items, " +
+                std::to_string(req.workers) + " workers, " +
+                std::to_string(req.timeBudgetSeconds) + " s budget");
 
-        os << "\nNesting " << input.itemCount << " parts on " << req.workers
-           << " workers for up to " << req.timeBudgetSeconds << " s.\n\n"
-           << "This dialog closes now and the solve continues in the background --\n"
-              "Fusion stays usable. A second message box reports the result.\n"
-              "\nLog: " << logPath();
-        if (ui) ui->messageBox(os.str(), "FuseNest");
+        // The dialog cannot open from here -- this command still owns the UI.
+        g_launchPending = true;
+    }
+};
+
+class DestroyHandler : public CommandEventHandler {
+  public:
+    void notify(const Ptr<CommandEventArgs>& /*args*/) override {
+        if (!g_launchPending) return;
+        g_launchPending = false;
+        if (Ptr<Application> app = Application::get()) app->fireCustomEvent(kLaunchEventId);
     }
 };
 
@@ -318,12 +494,14 @@ class CreatedHandler : public CommandCreatedEventHandler {
 
         cmd->validateInputs()->add(&validate_);
         cmd->execute()->add(&execute_);
+        cmd->destroy()->add(&destroy_);
         logLine("commandCreated: dialog built");
     }
 
   private:
     ValidateHandler validate_;
     ExecuteHandler execute_;
+    DestroyHandler destroy_;
 };
 
 CreatedHandler g_createdHandler;
@@ -369,16 +547,22 @@ bool registerNestCommand(const Ptr<Application>& app) {
     // CommandControl. cast<>() returns null rather than throwing.
     if (Ptr<CommandControl> cc = ctrl->cast<CommandControl>()) cc->isPromoted(true);
 
-    if (Ptr<CommandDefinition> stale = ui->commandDefinitions()->itemById(kApplyCmdId))
+    if (Ptr<CommandDefinition> stale = ui->commandDefinitions()->itemById(kResultCmdId))
         stale->deleteMe();
-    g_applyDef = ui->commandDefinitions()->addButtonDefinition(
-        kApplyCmdId, "FuseNest Apply", "Applies the last nesting result");
-    if (!g_applyDef || !g_applyDef->commandCreated()->add(&g_applyCreatedHandler)) {
-        logLine("could not create the apply command");
+    g_resultDef = ui->commandDefinitions()->addButtonDefinition(
+        kResultCmdId, "FuseNest Result", "Shows nesting progress and applies the result");
+    if (!g_resultDef || !g_resultDef->commandCreated()->add(&g_resultCreatedHandler)) {
+        logLine("could not create the result command");
         return false;
     }
 
-    if (!solverInit(app, &reportCompletion)) {
+    g_launchEvent = app->registerCustomEvent(kLaunchEventId);
+    if (!g_launchEvent || !g_launchEvent->add(&g_launchHandler)) {
+        logLine("could not register the launch event");
+        return false;
+    }
+
+    if (!solverInit(app, &onProgressTick, &reportCompletion)) {
         logLine("solverInit failed -- the command will register but cannot run");
         return false;
     }
@@ -395,13 +579,23 @@ void unregisterNestCommand(const Ptr<Application>& app) {
     Ptr<UserInterface> ui = app ? app->userInterface() : nullptr;
     if (!ui) return;
 
+    if (g_launchEvent) {
+        g_launchEvent->remove(&g_launchHandler);
+        g_launchEvent = nullptr;
+    }
+    if (app) app->unregisterCustomEvent(kLaunchEventId);
+
     if (Ptr<ToolbarPanel> panel = ui->allToolbarPanels()->itemById(kPanelId))
         if (Ptr<ToolbarControl> ctrl = panel->controls()->itemById(kCmdId)) ctrl->deleteMe();
 
     if (Ptr<CommandDefinition> def = ui->commandDefinitions()->itemById(kCmdId))
         def->deleteMe();
+    if (Ptr<CommandDefinition> def = ui->commandDefinitions()->itemById(kResultCmdId))
+        def->deleteMe();
 
+    g_resultCmd = nullptr;
     g_cmdDef = nullptr;
+    g_resultDef = nullptr;
     logLine("command unregistered");
 }
 

@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -13,13 +14,58 @@ namespace fusenest {
 namespace {
 
 const char* kEventId = "FuseNestSolveComplete";
+const char* kProgressEventId = "FuseNestSolveProgress";
+
+// Fast enough to feel live, slow enough that the main thread spends no real
+// time on it. The kernel's atomics update far more often than this; we are
+// sampling them, not following them.
+constexpr int kTickMs = 150;
 
 Ptr<CustomEvent> g_event;
+Ptr<CustomEvent> g_progressEvent;
 std::thread g_thread;
 std::atomic<bool> g_busy{false};
 std::atomic<int> g_rc{0};
 std::atomic<double> g_elapsedMs{0.0};
 std::function<void()> g_onFinished;
+std::function<void()> g_onProgress;
+
+// The ticker exists because kernel progress is polled, not pushed: something
+// has to decide when to look. A thread firing a CustomEvent is the only option
+// -- Fusion has no timer a worker can hang off.
+std::thread g_ticker;
+std::mutex g_tickerMutex;
+std::condition_variable g_tickerCv;
+bool g_tickerStop = false;
+
+void startTicker() {
+    {
+        std::lock_guard<std::mutex> lock(g_tickerMutex);
+        g_tickerStop = false;
+    }
+    g_ticker = std::thread([] {
+        for (;;) {
+            std::unique_lock<std::mutex> lock(g_tickerMutex);
+            // wait_for rather than sleep_for so stopping is immediate: a join
+            // that blocks for a whole tick would be a visible hitch.
+            g_tickerCv.wait_for(lock, std::chrono::milliseconds(kTickMs),
+                                [] { return g_tickerStop; });
+            if (g_tickerStop) return;
+            lock.unlock();
+            if (Ptr<Application> app = Application::get())
+                app->fireCustomEvent(kProgressEventId);
+        }
+    });
+}
+
+void stopTicker() {
+    {
+        std::lock_guard<std::mutex> lock(g_tickerMutex);
+        g_tickerStop = true;
+    }
+    g_tickerCv.notify_all();
+    if (g_ticker.joinable()) g_ticker.join();
+}
 
 std::string copyFrom(std::size_t (*fn)(unsigned char*, std::size_t), std::size_t hint) {
     if (hint == 0) hint = 1024;
@@ -32,6 +78,7 @@ std::string copyFrom(std::size_t (*fn)(unsigned char*, std::size_t), std::size_t
 class CompleteHandler : public CustomEventHandler {
   public:
     void notify(const Ptr<CustomEventArgs>& /*args*/) override {
+        stopTicker();
         // Join here rather than in the worker: the thread is finished by the
         // time the event is delivered, so this is immediate, and it leaves no
         // joinable thread behind if the add-in is stopped straight after.
@@ -41,12 +88,25 @@ class CompleteHandler : public CustomEventHandler {
     }
 };
 
+/// Runs on the main thread, every kTickMs while a solve is live. A tick queued
+/// just before completion can still arrive after it; reading the atomics is
+/// harmless either way, so this deliberately does not check g_busy.
+class ProgressHandler : public CustomEventHandler {
+  public:
+    void notify(const Ptr<CustomEventArgs>& /*args*/) override {
+        if (g_onProgress) g_onProgress();
+    }
+};
+
 CompleteHandler g_handler;
+ProgressHandler g_progressHandler;
 
 }  // namespace
 
-bool solverInit(const Ptr<Application>& app, std::function<void()> onFinished) {
+bool solverInit(const Ptr<Application>& app, std::function<void()> onProgress,
+                std::function<void()> onFinished) {
     if (!app) return false;
+    g_onProgress = std::move(onProgress);
     g_onFinished = std::move(onFinished);
 
     g_event = app->registerCustomEvent(kEventId);
@@ -60,11 +120,24 @@ bool solverInit(const Ptr<Application>& app, std::function<void()> onFinished) {
         logLine("CustomEvent::add failed");
         return false;
     }
+
+    g_progressEvent = app->registerCustomEvent(kProgressEventId);
+    if (!g_progressEvent) {
+        std::string err;
+        app->getLastError(&err);
+        logLine("registerCustomEvent (progress) failed: " + err);
+        return false;
+    }
+    if (!g_progressEvent->add(&g_progressHandler)) {
+        logLine("CustomEvent::add (progress) failed");
+        return false;
+    }
     return true;
 }
 
 void solverShutdown(const Ptr<Application>& app) {
     nk_cancel();
+    stopTicker();
     if (g_thread.joinable()) g_thread.join();
     g_busy = false;
 
@@ -72,8 +145,16 @@ void solverShutdown(const Ptr<Application>& app) {
         g_event->remove(&g_handler);
         g_event = nullptr;
     }
-    if (app) app->unregisterCustomEvent(kEventId);
+    if (g_progressEvent) {
+        g_progressEvent->remove(&g_progressHandler);
+        g_progressEvent = nullptr;
+    }
+    if (app) {
+        app->unregisterCustomEvent(kEventId);
+        app->unregisterCustomEvent(kProgressEventId);
+    }
     g_onFinished = nullptr;
+    g_onProgress = nullptr;
     logLine("solver shut down");
 }
 
@@ -107,6 +188,13 @@ bool solverStart(const std::string& instanceJson, int budgetSeconds, int workers
         g_busy = false;
         error = std::string("could not start solver thread: ") + e.what();
         return false;
+    }
+
+    try {
+        startTicker();
+    } catch (const std::exception& e) {
+        // A solve without a progress readout is degraded, not broken: let it run.
+        logLine(std::string("could not start progress ticker: ") + e.what());
     }
     return true;
 }
