@@ -1,0 +1,15 @@
+{
+  "clangd.arguments": [
+    "--compile-commands-dir=${workspaceFolder}/build/dev",
+    "--header-insertion=never",
+    "--background-index"
+  ],
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": true,
+  "files.associations": { "*.manifest": "json" },
+  "files.exclude": { "**/.DS_Store": true },
+  "search.exclude": {
+    "build/**": true,
+    "**/_autodesk_template_prebuilt/**": true
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach to Fusion (pick process)",
+      "type": "lldb",
+      "request": "attach",
+      "pid": "${command:pickProcess}",
+      "preLaunchTask": "build dev",
+      "initCommands": ["settings set target.inline-breakpoint-strategy always"],
+      "// why pickProcess": "attaching by path would hardcode Fusion's webdeploy hash, which changes on every update. Pick 'Autodesk Fusion' from the list.",
+      "// requires": "sudo DevToolsSecurity -enable (once)"
+    }
+  ]
+}

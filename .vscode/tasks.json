@@ -1,0 +1,42 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build dev",
+      "type": "shell",
+      "command": "cmake --build --preset dev",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$gcc",
+      "detail": "Stop the add-in in Fusion first -- Fusion holds the dylib open while it runs."
+    },
+    {
+      "label": "build dist (universal)",
+      "type": "shell",
+      "command": "cmake --build --preset dist",
+      "problemMatcher": "$gcc"
+    },
+    {
+      "label": "check artifact",
+      "type": "shell",
+      "command": "lipo -info dist/FuseNest/FuseNest.dylib && codesign -dv dist/FuseNest/FuseNest.dylib && nm -gU dist/FuseNest/FuseNest.dylib | grep -E ' _run$| _stop$' && ls -la dist/FuseNest",
+      "problemMatcher": []
+    },
+    {
+      "label": "tail log",
+      "type": "shell",
+      "command": "tail -f fusenest.log",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "package zip",
+      "type": "shell",
+      "command": "cmake --build --preset dist --target package-zip",
+      "problemMatcher": [],
+      "detail": "Universal build, then zip dist/FuseNest for sideloading."
+    }
+  ]
+}

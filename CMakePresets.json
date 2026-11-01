@@ -1,0 +1,41 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "14.0"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "dev (native arch, optimised + symbols, ccache)",
+      "description": "Edit-build-attach loop. RelWithDebInfo, NOT Debug: a Debug build is -O0 and makes every performance measurement meaningless. Native arch only, so ccache works.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "ccache"
+      }
+    },
+    {
+      "name": "dist",
+      "displayName": "dist (universal x86_64 + arm64)",
+      "description": "Shippable build. ccache is deliberately absent: it cannot handle two -arch flags.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_OSX_ARCHITECTURES": "x86_64;arm64"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "dist", "configurePreset": "dist" }
+  ]
+}

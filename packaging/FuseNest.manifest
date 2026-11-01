@@ -1,0 +1,13 @@
+{
+    "autodeskProduct": "Fusion",
+    "type": "addin",
+    "author": "phos.systems",
+    "description": {
+        "": "Fusion 2D nesting based on sparrow"
+    },
+    "version": "0.1.0",
+    "supportedOS": "windows|mac",
+    "runOnStartup": false,
+    "editEnabled": false,
+    "iconFilename": "AddInIcon.svg"
+}

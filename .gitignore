@@ -1,0 +1,12 @@
+# All generated. dist/ is reproducible from src/ + packaging/ + nest_kernel/.
+build/
+dist/
+nest_kernel/target/
+
+fusenest.log
+fusenest_instance.json
+fusenest_instance.json.solution.json
+fusenest_solution.json
+nest*.svg
+.DS_Store
+*.dSYM/

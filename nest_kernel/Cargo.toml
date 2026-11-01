@@ -1,0 +1,28 @@
+[package]
+name = "nest_kernel"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# staticlib: everything Rust needs is archived into one .a that the add-in
+# links directly. No second binary to ship, nothing to dlopen, and no runtime
+# dependency on Fusion's process layout.
+crate-type = ["staticlib"]
+
+[dependencies]
+# sparrow is NOT on crates.io (the crate of that name there is unrelated), and
+# it has no [lib] section -- but it ships src/lib.rs, which cargo auto-detects.
+# Pinned by rev so builds are reproducible; `cargo vendor` can lock it offline
+# if the dependency on GitHub ever becomes a problem.
+sparrow = { git = "https://github.com/JeroenGar/sparrow", rev = "6f7b9d353c2b2a4fc68454590a2e8e83475c12ef" }
+jagua-rs = { version = "=1.1.0", features = ["spp"] }
+serde_json = "1.0"
+rand = "0.10"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+# panic = "abort" is deliberately NOT set: catch_unwind needs unwinding, and
+# every FFI entry point is wrapped so a Rust panic can never unwind into C++
+# (undefined behaviour) or reach Fusion (process abort).
+panic = "unwind"
