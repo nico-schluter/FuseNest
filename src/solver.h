@@ -17,6 +17,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace fusenest {
 
@@ -50,6 +51,14 @@ void solverSetLogLevel(int level);
 void solverCancel();
 bool solverBusy();
 bool solverProgress(NkProgress& out);
+
+/// The kernel's current best feasible layout. `out` is resized to fit.
+/// Returns false when nothing has been published yet, which is the case for the
+/// first moments of a solve and for one that failed outright.
+bool solverSnapshot(std::vector<NkPlacement>& out, NkSnapshotInfo& info);
+
+/// Just the generation, for deciding whether a redraw is needed at all.
+std::uint64_t solverSnapshotGeneration();
 
 int solverReturnCode();
 std::string solverResultJson();

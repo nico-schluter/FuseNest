@@ -56,7 +56,29 @@ static STRIP_WIDTH_BITS: AtomicU32 = AtomicU32::new(0);
 /// Placements in a C-friendly form. The solver already has these structured,
 /// so handing them over as structs spares the C++ side a JSON parser it would
 /// otherwise need only for this.
-static PLACEMENTS: Mutex<Vec<NkPlacement>> = Mutex::new(Vec::new());
+/// A feasible layout, published whole.
+///
+/// The width and density live HERE rather than being read from the progress
+/// atomics, which is a distinction that cost a test failure to find: those
+/// atomics are overwritten continuously by report_separation_progress, including
+/// from states where items still overlap. Reading them alongside these
+/// placements describes a different layout than the one being drawn.
+struct Snapshot {
+    placements: Vec<NkPlacement>,
+    strip_width: f32,
+    density: f32,
+}
+
+static SNAPSHOT: Mutex<Snapshot> = Mutex::new(Snapshot {
+    placements: Vec::new(),
+    strip_width: 0.0,
+    density: 0.0,
+});
+
+/// Bumped every time SNAPSHOT is replaced. The main thread uses it to tell a
+/// layout it has already drawn from a new one, which is what keeps a live
+/// preview from re-applying the same placements several times a second.
+static SNAPSHOT_GEN: AtomicU64 = AtomicU64::new(0);
 
 static RESULT: Mutex<String> = Mutex::new(String::new());
 static ERROR: Mutex<String> = Mutex::new(String::new());
@@ -75,6 +97,18 @@ pub struct NkPlacement {
     /// feature cannot take a reflection -- it is not a rigid transform in the
     /// plane -- so the C++ side refuses rather than silently mangling a part.
     pub reflected: u32,
+}
+
+/// What a snapshot is, apart from its placements. Kept in step with
+/// nest_kernel.h by hand; a layout mismatch here is silent.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct NkSnapshotInfo {
+    pub generation: u64,
+    /// Placements in the snapshot, which may exceed what a copy could fit.
+    pub count: u64,
+    pub strip_width: f32,
+    pub density: f32,
 }
 
 #[repr(C)]
@@ -164,6 +198,39 @@ fn install_panic_hook() {
     });
 }
 
+/// Replaces the published layout with this solution's.
+///
+/// Only ever called with a FEASIBLE solution. sparrow also reports solutions
+/// mid-separation, where items still overlap -- those describe the search, not
+/// a layout anyone could cut, and publishing them would draw parts sitting on
+/// top of each other.
+fn publish_snapshot(sol: &jagua_rs::probs::spp::entities::SPSolution) {
+    let ext = jagua_rs::probs::spp::io::export(sol, *sparrow::EPOCH);
+    let placements = ext
+        .layout
+        .placed_items
+        .iter()
+        .map(|p| NkPlacement {
+            item_id: p.item_id,
+            rotation: p.transformation.rotation,
+            tx: p.transformation.translation.0,
+            ty: p.transformation.translation.1,
+            reflected: u32::from(p.transformation.reflected),
+        })
+        .collect::<Vec<_>>();
+
+    if let Ok(mut g) = SNAPSHOT.lock() {
+        *g = Snapshot {
+            placements,
+            strip_width: ext.strip_width,
+            density: sol.density(),
+        };
+    }
+    // Release: everything written above must be visible to a thread that sees
+    // this new generation.
+    SNAPSHOT_GEN.fetch_add(1, Ordering::Release);
+}
+
 struct FfiListener;
 
 impl SolutionListener for FfiListener {
@@ -179,6 +246,18 @@ impl SolutionListener for FfiListener {
             s.strip_width(),
             s.density() * 100.0
         ));
+
+        // This is what makes early accept possible: a feasible report is the
+        // same kind of artifact as the final answer, just earlier. optimize()
+        // ends by reporting its return value as ReportType::Final, so the last
+        // snapshot published here IS the final solution -- there is no separate
+        // finishing step a partial result would be missing.
+        match r {
+            ReportType::ExplFeas | ReportType::CmprFeas | ReportType::Final => {
+                publish_snapshot(s)
+            }
+            ReportType::ExplInfeas | ReportType::ExplImproving => {}
+        }
     }
 
     fn report_phase(&mut self, phase: OptimizationPhase) {
@@ -334,25 +413,10 @@ fn run_nest(input_json: &str, tuning: &NkTuning) -> Result<String, String> {
     )
     .map_err(|e| format!("optimize: {e}"))?;
 
+    // The listener already published this exact solution as a snapshot when
+    // optimize() reported it as ReportType::Final, so there is nothing to store
+    // here -- only the JSON to hand back.
     let ext_sol = jagua_rs::probs::spp::io::export(&solution, *sparrow::EPOCH);
-
-    let placements = ext_sol
-        .layout
-        .placed_items
-        .iter()
-        .map(|p| NkPlacement {
-            item_id: p.item_id,
-            rotation: p.transformation.rotation,
-            tx: p.transformation.translation.0,
-            ty: p.transformation.translation.1,
-            reflected: u32::from(p.transformation.reflected),
-        })
-        .collect::<Vec<_>>();
-    if let Ok(mut g) = PLACEMENTS.lock() {
-        *g = placements;
-    }
-    set_f32(&STRIP_WIDTH_BITS, ext_sol.strip_width);
-
     serde_json::to_string(&ext_sol).map_err(|e| format!("output JSON: {e}"))
 }
 
@@ -394,9 +458,15 @@ pub extern "C" fn nk_nest(
     set_f32(&STRIP_WIDTH_BITS, 0.0);
     store(&RESULT, String::new());
     store(&ERROR, String::new());
-    if let Ok(mut g) = PLACEMENTS.lock() {
-        g.clear();
+    if let Ok(mut g) = SNAPSHOT.lock() {
+        g.placements.clear();
+        g.strip_width = 0.0;
+        g.density = 0.0;
     }
+    // Not reset to zero: a monotonic counter means a stale generation held by
+    // the main thread can never accidentally match a new solve's first
+    // snapshot, which a reset-to-zero scheme would allow.
+    SNAPSHOT_GEN.fetch_add(1, Ordering::Release);
     RUNNING.store(true, Ordering::Relaxed);
 
     let tuning = NkTuning {
@@ -463,34 +533,46 @@ fn copy_out(slot: &Mutex<String>, buf: *mut u8, len: usize) -> usize {
     n
 }
 
+/// The current snapshot's generation. Cheap; safe at any time, and the only
+/// call needed to decide whether anything has changed.
 #[unsafe(no_mangle)]
-pub extern "C" fn nk_placement_count() -> usize {
-    PLACEMENTS.lock().map(|g| g.len()).unwrap_or(0)
+pub extern "C" fn nk_snapshot_generation() -> u64 {
+    SNAPSHOT_GEN.load(Ordering::Acquire)
 }
 
-/// Copies placement `index` into `out`. 0 on success, -1 out of range,
-/// -2 null pointer.
+/// Copies the published layout and its own measurements under one lock.
+/// Returns the number of placements written, 0 if nothing is published yet.
+///
+/// This replaces a count-then-index-each-placement loop, which was safe only
+/// while placements were written once at the end of a solve. Now that they are
+/// republished on every improvement, reading them one at a time can splice two
+/// layouts together and produce a drawing of neither.
 #[unsafe(no_mangle)]
-pub extern "C" fn nk_placement_at(index: usize, out: *mut NkPlacement) -> i32 {
-    if out.is_null() {
-        return -2;
+pub extern "C" fn nk_snapshot_copy(
+    out: *mut NkPlacement,
+    max: usize,
+    info: *mut NkSnapshotInfo,
+) -> usize {
+    let Ok(guard) = SNAPSHOT.lock() else {
+        return 0;
+    };
+    let n = if out.is_null() { 0 } else { guard.placements.len().min(max) };
+    if n > 0 {
+        unsafe { std::ptr::copy_nonoverlapping(guard.placements.as_ptr(), out, n) };
     }
-    match PLACEMENTS.lock() {
-        Ok(g) => match g.get(index) {
-            Some(p) => {
-                unsafe { *out = *p };
-                0
-            }
-            None => -1,
-        },
-        Err(_) => -1,
+    if !info.is_null() {
+        unsafe {
+            *info = NkSnapshotInfo {
+                generation: SNAPSHOT_GEN.load(Ordering::Acquire),
+                count: guard.placements.len() as u64,
+                strip_width: guard.strip_width,
+                density: guard.density,
+            };
+        }
     }
+    n
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn nk_strip_width() -> f32 {
-    get_f32(&STRIP_WIDTH_BITS)
-}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn nk_result_len() -> usize {
@@ -589,6 +671,70 @@ mod tests {
             }
             print!("{}", String::from_utf8_lossy(&buf[..n]));
         }
+    }
+
+    /// Confirms feasible layouts are published as the solve runs, not just at
+    /// the end, and that the generation advances with them.
+    #[test]
+    fn snapshots_stream() {
+        let json = std::fs::read_to_string("../fusenest_instance.json").expect("instance json");
+        nk_log_set_level(0);
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(u64, usize, f32)>::new()));
+        let watcher = {
+            let seen = seen.clone();
+            std::thread::spawn(move || {
+                let mut last = 0u64;
+                let mut buf = vec![NkPlacement::default(); 4096];
+                while RUNNING.load(Ordering::Relaxed) || last == 0 {
+                    let mut info = NkSnapshotInfo::default();
+                    let n = nk_snapshot_copy(buf.as_mut_ptr(), buf.len(), &mut info);
+                    if info.generation != last && n > 0 {
+                        last = info.generation;
+                        seen.lock().unwrap().push((info.generation, n, info.strip_width));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            })
+        };
+
+        RUNNING.store(true, Ordering::Relaxed);
+        let tuning = NkTuning { time_limit_ms: 20_000, ..NkTuning::default() };
+        let out = run_nest(&json, &tuning);
+        RUNNING.store(false, Ordering::Relaxed);
+        watcher.join().unwrap();
+        assert!(out.is_ok(), "solve failed: {out:?}");
+
+        let seen = seen.lock().unwrap();
+        println!("observed {} distinct snapshots mid-solve", seen.len());
+        for (gen, n, w) in seen.iter().take(4) {
+            println!("  gen {gen}: {n} placements, width {w:.3}");
+        }
+        if let Some((gen, n, w)) = seen.last() {
+            println!("  ...  gen {gen}: {n} placements, width {w:.3}");
+        }
+
+        assert!(seen.len() > 5, "expected a stream, saw {}", seen.len());
+        let widths: Vec<f32> = seen.iter().map(|(_, _, w)| *w).collect();
+        // Monotonic by construction: exploration reports a feasible solution
+        // only when it beats the best width, and compression only on success.
+        // This assertion earned its keep -- it failed while the width was being
+        // read from the progress atomics instead of from the snapshot, which is
+        // exactly the bug of describing one layout while drawing another.
+        for pair in widths.windows(2) {
+            let tolerance = pair[0] * 1e-6;
+            assert!(
+                pair[1] <= pair[0] + tolerance,
+                "width grew beyond rounding: {} -> {}",
+                pair[0],
+                pair[1]
+            );
+        }
+        let counts: Vec<usize> = seen.iter().map(|(_, n, _)| *n).collect();
+        assert!(
+            counts.iter().all(|c| *c == counts[0]),
+            "every snapshot must place every part: {counts:?}"
+        );
     }
 
     /// cargo test --release -- --nocapture trace

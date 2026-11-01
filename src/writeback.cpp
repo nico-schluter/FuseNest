@@ -35,7 +35,8 @@ Ptr<Matrix3D> placementMatrix(const NkPlacement& p) {
 
 }  // namespace
 
-WriteBackResult applyPlacements(const Ptr<Application>& app, const std::vector<Profile>& profiles) {
+WriteBackResult applyPlacements(const Ptr<Application>& app, const std::vector<Profile>& profiles,
+                                const std::vector<NkPlacement>& placements, bool groupTimeline) {
     WriteBackResult result;
 
     Ptr<Design> design = app ? app->activeProduct()->cast<Design>() : nullptr;
@@ -55,20 +56,12 @@ WriteBackResult applyPlacements(const Ptr<Application>& app, const std::vector<P
     Ptr<Timeline> timeline = parametric ? design->timeline() : nullptr;
     const int markerBefore = timeline ? timeline->markerPosition() : 0;
 
-    const std::size_t count = nk_placement_count();
-    if (count == 0) {
-        result.warnings.push_back("solver returned no placements");
+    if (placements.empty()) {
+        result.warnings.push_back("no placements to apply");
         return result;
     }
 
-    for (std::size_t i = 0; i < count; ++i) {
-        NkPlacement p{};
-        if (nk_placement_at(i, &p) != 0) {
-            result.warnings.push_back("could not read placement " + std::to_string(i));
-            ++result.skipped;
-            continue;
-        }
-
+    for (const NkPlacement& p : placements) {
         if (p.reflected) {
             // Refuse loudly. Fusion would reject the matrix anyway, and a
             // silent drop would leave the part in the wrong place.
@@ -127,7 +120,7 @@ WriteBackResult applyPlacements(const Ptr<Application>& app, const std::vector<P
 
     // One collapsible timeline entry instead of N. Only meaningful in a
     // parametric design; direct modelling has no timeline at all.
-    if (timeline && result.moved > 1) {
+    if (groupTimeline && timeline && result.moved > 1) {
         const int markerAfter = timeline->markerPosition();
         if (markerAfter - 1 > markerBefore) {
             Ptr<TimelineGroups> groups = timeline->timelineGroups();

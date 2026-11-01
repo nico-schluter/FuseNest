@@ -9,8 +9,10 @@
 
 #include <Fusion/FusionAll.h>
 
+#include <chrono>
 #include <fstream>
 #include <sstream>
+#include <vector>
 
 using namespace adsk::core;
 using namespace adsk::fusion;
@@ -82,9 +84,31 @@ long g_inputChangedCount = 0;
 long g_previewApplied = 0;
 std::string g_lastChangedId;
 
+/// The layout the preview is currently drawing, and where it came from. Held so
+/// the preview and a later Apply use the same one even though the kernel keeps
+/// publishing better ones underneath.
+std::vector<NkPlacement> g_shown;
+NkSnapshotInfo g_shownInfo{};
+
+/// Generation last pushed to the preview. Previews are expensive -- a full
+/// write-back of every body -- so the clock only advances when the kernel has
+/// actually found something better.
+std::uint64_t g_previewedGeneration = 0;
+
+/// Floor on the interval between previews. The kernel improves a layout several
+/// times a second early in a solve, and each preview moves every body in the
+/// design; redrawing at that rate buys nothing a person can see.
+constexpr double kMinPreviewIntervalMs = 400.0;
+std::chrono::steady_clock::time_point g_lastPreviewAt{};
+
 /// Set once a preview has claimed its result as the final one, so the execute
 /// handler knows not to apply the same placements a second time.
 bool g_previewClaimed = false;
+
+/// Defined below, next to the rest of the preview plumbing; declared here
+/// because the dialog's created handler needs it to catch up on a solve that
+/// was already running before it opened.
+void maybeAdvancePreview();
 
 const char* phaseLabel(std::uint32_t phase) {
     switch (phase) {
@@ -125,11 +149,18 @@ std::string statusText() {
         os << "<b>Finished</b> in " << static_cast<long>(solverElapsedMs()) << " ms<br/>";
     }
 
-    if (have) {
-        os << "density " << static_cast<int>(p.density * 100.0) << " % &middot; width "
-           << static_cast<long>(p.strip_width) << " mm<br/>"
-           << p.separations << " separation attempts";
+    // Numbers from the snapshot, not from progress: these must describe the
+    // layout on screen. The separation count is search activity and belongs to
+    // the progress side.
+    if (!g_shown.empty()) {
+        os << "density " << static_cast<int>(g_shownInfo.density * 100.0) << " % &middot; width "
+           << static_cast<long>(g_shownInfo.strip_width) << " mm &middot; " << g_shown.size()
+           << " parts placed";
+        if (!g_solveFinished) os << "<br/>best so far -- Apply keeps it";
+    } else if (!g_solveFinished) {
+        os << "looking for a first feasible layout";
     }
+    if (have && !g_solveFinished) os << "<br/>" << p.separations << " separation attempts";
     return os.str();
 }
 
@@ -197,7 +228,7 @@ class ResultExecuteHandler : public CommandEventHandler {
             return;
         }
 
-        const WriteBackResult wb = applyPlacements(app, g_lastProfiles);
+        const WriteBackResult wb = applyPlacements(app, g_lastProfiles, g_shown);
         logLine("applied: " + std::to_string(wb.moved) + " moved, " +
                 std::to_string(wb.skipped) + " skipped");
         for (const auto& w : wb.warnings) logLine("writeback warning: " + w);
@@ -218,21 +249,22 @@ class ResultPreviewHandler : public CommandEventHandler {
     void notify(const Ptr<CommandEventArgs>& args) override {
         ++g_previewCount;
 
-        // Do the real write-back here and claim it as the final result. This is
-        // the whole mechanism the design rests on, and it has not been proven
-        // yet -- previews firing is a separate question from previews working.
-        // Mid-solve this is self-limiting: the kernel holds no placements until
-        // it finishes, so moved == 0 and nothing touches the model.
-        const WriteBackResult wb = applyPlacements(Application::get(), g_lastProfiles);
+        // Draws the layout the tick captured, NOT a freshly fetched one. Fusion
+        // rolls each preview back before regenerating, so this re-applies every
+        // time; fetching here instead would mean the drawing changed under a
+        // user who had not asked for anything.
+        //
+        // Timeline grouping is skipped: these moves are about to be discarded,
+        // and grouping them costs a timeline operation per preview. The preview
+        // that OK keeps is regrouped by the execute path.
+        const WriteBackResult wb =
+            applyPlacements(Application::get(), g_lastProfiles, g_shown, /*groupTimeline=*/false);
         if (wb.moved > 0) {
             ++g_previewApplied;
             g_previewClaimed = true;
-            logLine("preview " + std::to_string(g_previewCount) + ": moved " +
-                    std::to_string(wb.moved) + " (apply #" + std::to_string(g_previewApplied) +
-                    ")");
         }
-        // isValidResult tells Fusion the preview is reusable: OK should then keep
-        // these transforms instead of rolling back and firing execute.
+        // isValidResult tells Fusion the preview is reusable: OK keeps these
+        // transforms instead of rolling back and firing execute.
         if (args) args->isValidResult(wb.moved > 0);
     }
 };
@@ -241,13 +273,13 @@ class ResultValidateHandler : public ValidateInputsEventHandler {
   public:
     void notify(const Ptr<ValidateInputsEventArgs>& args) override {
         ++g_validateCount;
-        // Validity gates the preview: while this was false for the duration of a
-        // solve, executePreview never fired once. It stays true unconditionally
-        // for now, which is also harmless -- the kernel holds no placements until
-        // it finishes, so an early Apply moves nothing. Once partial results
-        // stream out this becomes "a feasible layout exists", which is the real
-        // condition for both previewing and accepting.
-        if (args) args->areInputsValid(true);
+        // Validity gates the preview as well as the OK button: while this was
+        // false for the duration of a solve, executePreview never fired once.
+        // Both now rest on the same condition -- there is a feasible layout to
+        // show and to accept. Which is the whole point of streaming: that
+        // becomes true a fraction of a second into a solve rather than at the
+        // end of one.
+        if (args) args->areInputsValid(!g_shown.empty());
     }
 };
 
@@ -331,6 +363,12 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
         g_previewApplied = 0;
         g_previewClaimed = false;
         g_lastChangedId.clear();
+        g_previewedGeneration = 0;
+        g_lastPreviewAt = {};
+        g_shown.clear();
+        g_shownInfo = NkSnapshotInfo{};
+        // A solve may already have published layouts before this dialog opened.
+        maybeAdvancePreview();
         logLine("result dialog open");
     }
 
@@ -364,6 +402,40 @@ LaunchHandler g_launchHandler;
 
 // --- engine callbacks ----------------------------------------------------
 
+/// Picks up a newer layout from the kernel and asks Fusion to redraw, but only
+/// when there is something better to show and enough time has passed to be
+/// worth a full write-back.
+///
+/// Fusion regenerates a preview in response to an input VALUE changing. A
+/// TextBoxCommandInput's formattedText is not one -- writing it fires no
+/// inputChanged at all -- so the hidden clock input is what carries the request.
+void maybeAdvancePreview() {
+    if (!g_resultCmd) return;
+
+    const std::uint64_t gen = solverSnapshotGeneration();
+    if (gen == g_previewedGeneration) return;
+
+    const auto now = std::chrono::steady_clock::now();
+    const double sinceMs =
+        std::chrono::duration<double, std::milli>(now - g_lastPreviewAt).count();
+    // Always let the final result through: it is the one the user acts on, and
+    // it arrives exactly once.
+    if (!g_solveFinished && sinceMs < kMinPreviewIntervalMs) return;
+
+    NkSnapshotInfo info{};
+    std::vector<NkPlacement> fresh;
+    if (!solverSnapshot(fresh, info)) return;
+
+    g_shown = std::move(fresh);
+    g_shownInfo = info;
+    g_previewedGeneration = info.generation;
+    g_lastPreviewAt = now;
+
+    if (Ptr<CommandInputs> inputs = g_resultCmd->commandInputs())
+        if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInPreviewClock))
+            b->value(!b->value());
+}
+
 /// Main thread, every ~150 ms while a solve runs.
 void onProgressTick() {
     ++g_tickCount;
@@ -376,20 +448,13 @@ void onProgressTick() {
     // with no dialog, with "changing command inputs" named as the normal
     // trigger -- and we are changing one just above. Call it anyway and count
     // what arrives; the log says which of the two is doing the work.
-    // doExecutePreview() is gone: it returned true 400 times while firing
-    // nothing, which matches its documented purpose of letting a palette drive
-    // a dialog-less command. Toggling the clock is what actually works.
-    bool toggled = false;
-    if (Ptr<CommandInputs> inputs = g_resultCmd->commandInputs())
-        if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInPreviewClock))
-            toggled = b->value(!b->value());
+    maybeAdvancePreview();
 
-    if (g_tickCount == 1 || g_tickCount % 20 == 0)
-        logLine("tick " + std::to_string(g_tickCount) + ": toggle -> " +
-                (toggled ? "true" : "false") + ", previews " + std::to_string(g_previewCount) +
-                ", validates " + std::to_string(g_validateCount) + ", inputChanged " +
-                std::to_string(g_inputChangedCount) + " (last: " +
-                (g_lastChangedId.empty() ? "none" : g_lastChangedId) + ")");
+    if (g_tickCount == 1 || g_tickCount % 40 == 0)
+        logLine("tick " + std::to_string(g_tickCount) + ": gen " +
+                std::to_string(g_shownInfo.generation) + ", previews " +
+                std::to_string(g_previewCount) + " (" + std::to_string(g_previewApplied) +
+                " applied), validates " + std::to_string(g_validateCount));
 }
 
 /// Main thread, once, however the solve ended.
@@ -410,8 +475,12 @@ void reportCompletion() {
             if (f) f << json;
         }
         logLine("solve complete in " + std::to_string(static_cast<long>(solverElapsedMs())) +
-                " ms, " + std::to_string(nk_placement_count()) + " placements");
+                " ms, generation " + std::to_string(solverSnapshotGeneration()));
     }
+
+    // The final solution is published as a snapshot like any other, so the same
+    // path picks it up -- there is no separate finishing step.
+    maybeAdvancePreview();
 
     if (!refreshResultDialog()) {
         // Two different situations, and the trivial-solve case is not a problem:

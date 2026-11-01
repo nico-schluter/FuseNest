@@ -222,6 +222,24 @@ void solverDrainKernelLog() {
 
 void solverSetLogLevel(int level) { nk_log_set_level(static_cast<std::uint32_t>(level)); }
 
+bool solverSnapshot(std::vector<NkPlacement>& out, NkSnapshotInfo& info) {
+    info = NkSnapshotInfo{};
+    // Ask for the size first. A solve republishes between these two calls at
+    // most a few times a second, and a short read just means one redraw lags by
+    // a generation -- the next tick corrects it.
+    nk_snapshot_copy(nullptr, 0, &info);
+    if (info.count == 0) {
+        out.clear();
+        return false;
+    }
+    out.resize(static_cast<std::size_t>(info.count));
+    const std::size_t n = nk_snapshot_copy(out.data(), out.size(), &info);
+    out.resize(n);
+    return n > 0;
+}
+
+std::uint64_t solverSnapshotGeneration() { return nk_snapshot_generation(); }
+
 void solverCancel() { nk_cancel(); }
 
 bool solverBusy() { return g_busy.load(); }

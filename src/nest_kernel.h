@@ -42,10 +42,26 @@ std::int32_t nk_progress(NkProgress* out);
 // Graceful: the solver polls this and returns its best solution so far.
 void nk_cancel();
 
-// Placements as structs, so no JSON parser is needed on this side.
-std::size_t nk_placement_count();
-std::int32_t nk_placement_at(std::size_t index, NkPlacement* out);
-float nk_strip_width();
+/// A published layout, apart from its placements.
+///
+/// `strip_width` and `density` belong to THIS layout, which is the whole point
+/// of them living here rather than being read from NkProgress: those fields are
+/// overwritten continuously by the separator, including from states where items
+/// still overlap, so pairing them with a snapshot describes a layout other than
+/// the one being drawn.
+struct NkSnapshotInfo {
+    std::uint64_t generation;
+    std::uint64_t count;  // placements held, which may exceed what a copy fits
+    float strip_width;    // millimetres
+    float density;        // fraction
+};
+
+// The published layout, replaced on every feasible improvement rather than
+// written once at the end. Generation is cheap and is the only call needed to
+// decide whether anything changed; the copy takes everything under one lock,
+// because reading placements one at a time can splice two layouts together.
+std::uint64_t nk_snapshot_generation();
+std::size_t nk_snapshot_copy(NkPlacement* out, std::size_t max, NkSnapshotInfo* info);
 
 // sparrow narrates its own search through the `log` crate; the kernel captures
 // those lines into a ring buffer instead of letting a GUI process discard them.

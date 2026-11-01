@@ -14,6 +14,7 @@
 //     there, not directly from the CustomEvent handler that receives the result.
 #pragma once
 
+#include "nest_kernel.h"
 #include "profile.h"
 
 #include <Core/CoreAll.h>
@@ -31,8 +32,18 @@ struct WriteBackResult {
 };
 
 /// Moves each profile's source body to the position the solver chose.
-/// Reads placements straight from the kernel, so it must run after a solve.
+///
+/// Placements are passed in rather than read from the kernel, because a live
+/// preview and a final apply must be able to use the SAME layout: the kernel's
+/// published snapshot changes several times a second while a solve runs, so a
+/// function that fetched its own would draw something subtly different each
+/// time it was asked to draw the same thing.
+///
+/// `groupTimeline` collapses the moves into one timeline entry. Worth skipping
+/// for a preview that is about to be rolled back.
 WriteBackResult applyPlacements(const adsk::core::Ptr<adsk::core::Application>& app,
-                                const std::vector<Profile>& profiles);
+                                const std::vector<Profile>& profiles,
+                                const std::vector<NkPlacement>& placements,
+                                bool groupTimeline = true);
 
 }  // namespace fusenest
