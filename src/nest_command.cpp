@@ -47,6 +47,7 @@ const char* kInBudget = "fnBudget";
 const char* kInWorkers = "fnWorkers";
 const char* kInStatus = "fnStatus";
 const char* kInJob = "fnJob";
+const char* kInTick = "fnTick";
 
 Ptr<CommandDefinition> g_cmdDef;
 Ptr<CommandDefinition> g_resultDef;
@@ -76,6 +77,13 @@ bool g_solveFinished = false;
 long g_tickCount = 0;
 long g_previewCount = 0;
 long g_validateCount = 0;
+long g_inputChangedCount = 0;
+long g_previewApplied = 0;
+std::string g_lastChangedId;
+
+/// Set once a preview has claimed its result as the final one, so the execute
+/// handler knows not to apply the same placements a second time.
+bool g_previewClaimed = false;
 
 const char* phaseLabel(std::uint32_t phase) {
     switch (phase) {
@@ -178,6 +186,14 @@ class ResultExecuteHandler : public CommandEventHandler {
         Ptr<Application> app = Application::get();
         Ptr<UserInterface> ui = app ? app->userInterface() : nullptr;
 
+        if (g_previewClaimed) {
+            // Fusion reused the preview's transforms, so there is nothing left
+            // to do. If this line never appears, isValidResult did not take and
+            // the write-back has to stay in execute.
+            logLine("execute: preview already claimed the result, nothing to apply");
+            return;
+        }
+
         const WriteBackResult wb = applyPlacements(app, g_lastProfiles);
         logLine("applied: " + std::to_string(wb.moved) + " moved, " +
                 std::to_string(wb.skipped) + " skipped");
@@ -198,10 +214,23 @@ class ResultPreviewHandler : public CommandEventHandler {
   public:
     void notify(const Ptr<CommandEventArgs>& args) override {
         ++g_previewCount;
-        // The placements are not previewed yet, so nothing here is reusable as
-        // the final result. Once it is, this becomes true and OK gets the
-        // preview's transforms for free instead of re-running the write-back.
-        if (args) args->isValidResult(false);
+
+        // Do the real write-back here and claim it as the final result. This is
+        // the whole mechanism the design rests on, and it has not been proven
+        // yet -- previews firing is a separate question from previews working.
+        // Mid-solve this is self-limiting: the kernel holds no placements until
+        // it finishes, so moved == 0 and nothing touches the model.
+        const WriteBackResult wb = applyPlacements(Application::get(), g_lastProfiles);
+        if (wb.moved > 0) {
+            ++g_previewApplied;
+            g_previewClaimed = true;
+            logLine("preview " + std::to_string(g_previewCount) + ": moved " +
+                    std::to_string(wb.moved) + " (apply #" + std::to_string(g_previewApplied) +
+                    ")");
+        }
+        // isValidResult tells Fusion the preview is reusable: OK should then keep
+        // these transforms instead of rolling back and firing execute.
+        if (args) args->isValidResult(wb.moved > 0);
     }
 };
 
@@ -219,6 +248,19 @@ class ResultValidateHandler : public ValidateInputsEventHandler {
     }
 };
 
+/// Answers a direct question: does writing to a TextBoxCommandInput count as an
+/// input change at all? If this only ever reports the diagnostic checkbox, then
+/// textbox writes are invisible to Fusion's change pipeline, which would explain
+/// the preview never firing on its own.
+class ResultInputChangedHandler : public InputChangedEventHandler {
+  public:
+    void notify(const Ptr<InputChangedEventArgs>& args) override {
+        ++g_inputChangedCount;
+        if (args)
+            if (Ptr<CommandInput> in = args->input()) g_lastChangedId = in->id();
+    }
+};
+
 class ResultDestroyHandler : public CommandEventHandler {
   public:
     void notify(const Ptr<CommandEventArgs>& args) override {
@@ -226,8 +268,10 @@ class ResultDestroyHandler : public CommandEventHandler {
             args ? args->terminationReason() : UnknownTerminationReason;
         logLine(std::string("result dialog closed: ") + terminationLabel(why) +
                 " -- ticks " + std::to_string(g_tickCount) + ", previews " +
-                std::to_string(g_previewCount) + ", validates " +
-                std::to_string(g_validateCount));
+                std::to_string(g_previewCount) + " (" + std::to_string(g_previewApplied) +
+                " applied), validates " + std::to_string(g_validateCount) +
+                ", inputChanged " + std::to_string(g_inputChangedCount) + " (last: " +
+                (g_lastChangedId.empty() ? "none" : g_lastChangedId) + ")");
 
         // Unconditional: a dialog that is gone has nobody left to show progress
         // to, so the engine has no reason to keep burning cores. On OK the
@@ -263,20 +307,29 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
         inputs->addTextBoxCommandInput(kInStatus, "", statusText(), 3, true);
         if (!g_jobSummary.empty())
             inputs->addTextBoxCommandInput(kInJob, "", g_jobSummary, 6, true);
+        // DIAGNOSTIC. A checkbox whose value actually changes, unlike a textbox's
+        // formattedText, which may not register as a value change at all. Toggled
+        // on every tick; it will visibly flicker, which is the point.
+        inputs->addBoolValueInput(kInTick, "tick (diagnostic)", true, "", false);
 
         cmd->validateInputs()->add(&validate_);
         cmd->executePreview()->add(&preview_);
+        cmd->inputChanged()->add(&inputChanged_);
         cmd->execute()->add(&execute_);
         cmd->destroy()->add(&destroy_);
 
         g_resultCmd = cmd;
-        g_tickCount = g_previewCount = g_validateCount = 0;
+        g_tickCount = g_previewCount = g_validateCount = g_inputChangedCount = 0;
+        g_previewApplied = 0;
+        g_previewClaimed = false;
+        g_lastChangedId.clear();
         logLine("result dialog open");
     }
 
   private:
     ResultValidateHandler validate_;
     ResultPreviewHandler preview_;
+    ResultInputChangedHandler inputChanged_;
     ResultExecuteHandler execute_;
     ResultDestroyHandler destroy_;
 };
@@ -313,11 +366,20 @@ void onProgressTick() {
     // trigger -- and we are changing one just above. Call it anyway and count
     // what arrives; the log says which of the two is doing the work.
     const bool asked = g_resultCmd->doExecutePreview();
+
+    // The other half of the experiment: mutate a real input, not a display one.
+    bool toggled = false;
+    if (Ptr<CommandInputs> inputs = g_resultCmd->commandInputs())
+        if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInTick))
+            toggled = b->value(!b->value());
+
     if (g_tickCount == 1 || g_tickCount % 20 == 0)
         logLine("tick " + std::to_string(g_tickCount) + ": doExecutePreview -> " +
-                (asked ? "true" : "false") + ", previews so far " +
-                std::to_string(g_previewCount) + ", validates " +
-                std::to_string(g_validateCount));
+                (asked ? "true" : "false") + ", toggle -> " + (toggled ? "true" : "false") +
+                ", previews " + std::to_string(g_previewCount) + ", validates " +
+                std::to_string(g_validateCount) + ", inputChanged " +
+                std::to_string(g_inputChangedCount) + " (last: " +
+                (g_lastChangedId.empty() ? "none" : g_lastChangedId) + ")");
 }
 
 /// Main thread, once, however the solve ended.
