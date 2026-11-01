@@ -47,7 +47,7 @@ const char* kInBudget = "fnBudget";
 const char* kInWorkers = "fnWorkers";
 const char* kInStatus = "fnStatus";
 const char* kInJob = "fnJob";
-const char* kInTick = "fnTick";
+const char* kInPreviewClock = "fnPreviewClock";
 
 Ptr<CommandDefinition> g_cmdDef;
 Ptr<CommandDefinition> g_resultDef;
@@ -238,12 +238,12 @@ class ResultValidateHandler : public ValidateInputsEventHandler {
   public:
     void notify(const Ptr<ValidateInputsEventArgs>& args) override {
         ++g_validateCount;
-        // DIAGNOSTIC, not the intended gate. The first run showed executePreview
-        // never firing while a solve ran -- and never firing is exactly what you
-        // would see if Fusion refuses to preview a dialog whose inputs are
-        // invalid, which ours were for the whole solve. Forced true to test that.
-        // Applying early is harmless meanwhile: the kernel holds no placements
-        // until it finishes, and a zero-placement write-back moves nothing.
+        // Validity gates the preview: while this was false for the duration of a
+        // solve, executePreview never fired once. It stays true unconditionally
+        // for now, which is also harmless -- the kernel holds no placements until
+        // it finishes, so an early Apply moves nothing. Once partial results
+        // stream out this becomes "a feasible layout exists", which is the real
+        // condition for both previewing and accepting.
         if (args) args->areInputsValid(true);
     }
 };
@@ -307,10 +307,15 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
         inputs->addTextBoxCommandInput(kInStatus, "", statusText(), 3, true);
         if (!g_jobSummary.empty())
             inputs->addTextBoxCommandInput(kInJob, "", g_jobSummary, 6, true);
-        // DIAGNOSTIC. A checkbox whose value actually changes, unlike a textbox's
-        // formattedText, which may not register as a value change at all. Toggled
-        // on every tick; it will visibly flicker, which is the point.
-        inputs->addBoolValueInput(kInTick, "tick (diagnostic)", true, "", false);
+        // The preview clock. Fusion regenerates a preview in response to an input
+        // VALUE changing, and a TextBoxCommandInput's formattedText is not one --
+        // writing it fires no inputChanged at all. So the status readout cannot
+        // drive the preview and something else has to. This input exists purely
+        // to be toggled once per progress tick; it is hidden because it carries
+        // no meaning to the user.
+        if (Ptr<BoolValueCommandInput> clock =
+                inputs->addBoolValueInput(kInPreviewClock, "preview clock", true, "", false))
+            clock->isVisible(false);
 
         cmd->validateInputs()->add(&validate_);
         cmd->executePreview()->add(&preview_);
@@ -365,19 +370,18 @@ void onProgressTick() {
     // with no dialog, with "changing command inputs" named as the normal
     // trigger -- and we are changing one just above. Call it anyway and count
     // what arrives; the log says which of the two is doing the work.
-    const bool asked = g_resultCmd->doExecutePreview();
-
-    // The other half of the experiment: mutate a real input, not a display one.
+    // doExecutePreview() is gone: it returned true 400 times while firing
+    // nothing, which matches its documented purpose of letting a palette drive
+    // a dialog-less command. Toggling the clock is what actually works.
     bool toggled = false;
     if (Ptr<CommandInputs> inputs = g_resultCmd->commandInputs())
-        if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInTick))
+        if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInPreviewClock))
             toggled = b->value(!b->value());
 
     if (g_tickCount == 1 || g_tickCount % 20 == 0)
-        logLine("tick " + std::to_string(g_tickCount) + ": doExecutePreview -> " +
-                (asked ? "true" : "false") + ", toggle -> " + (toggled ? "true" : "false") +
-                ", previews " + std::to_string(g_previewCount) + ", validates " +
-                std::to_string(g_validateCount) + ", inputChanged " +
+        logLine("tick " + std::to_string(g_tickCount) + ": toggle -> " +
+                (toggled ? "true" : "false") + ", previews " + std::to_string(g_previewCount) +
+                ", validates " + std::to_string(g_validateCount) + ", inputChanged " +
                 std::to_string(g_inputChangedCount) + " (last: " +
                 (g_lastChangedId.empty() ? "none" : g_lastChangedId) + ")");
 }
