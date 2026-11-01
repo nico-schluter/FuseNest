@@ -186,9 +186,20 @@ std::string statusText() {
     } else if (!g_solveFinished) {
         os << "looking for a first feasible layout";
     }
-    if (have && !g_solveFinished) os << "<br/>" << p.separations << " separation attempts";
+    // Deliberately carries NOTHING that changes per tick. The separation count
+    // used to be here, and it cost 349 executePreview events -- each a full
+    // write-back of every body -- for 5 wanted redraws. Writing this textbox
+    // fires inputChanged, which regenerates the preview, so anything in here
+    // that moves on its own drives the viewport.
+    //
+    // (An earlier run concluded textbox writes fire no inputChanged. That was a
+    // measurement artifact: the clock toggle happened later in the same tick, so
+    // it always masked the textbox as the last-changed input.)
     return os.str();
 }
+
+/// The status text as last written, so an unchanged one is not written again.
+std::string g_statusShown;
 
 /// Pushes the current status into the open result dialog, if there is one.
 /// Returns whether a dialog was there to update.
@@ -196,8 +207,16 @@ bool refreshResultDialog() {
     if (!g_resultCmd) return false;
     Ptr<CommandInputs> inputs = g_resultCmd->commandInputs();
     if (!inputs) return false;
-    if (Ptr<TextBoxCommandInput> tb = inputs->itemById(kInStatus))
-        tb->formattedText(statusText());
+
+    // Only on a real change. Every write to this input regenerates the preview,
+    // so a redundant one costs a full write-back of the whole design.
+    const std::string text = statusText();
+    if (text != g_statusShown) {
+        if (Ptr<TextBoxCommandInput> tb = inputs->itemById(kInStatus)) {
+            tb->formattedText(text);
+            g_statusShown = text;
+        }
+    }
     return true;
 }
 
@@ -393,6 +412,7 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
         g_previewedGeneration = 0;
         g_lastPreviewAt = {};
         g_toggles = g_previewsSinceToggle = g_maxPreviewsPerToggle = g_skippedRedraws = 0;
+        g_statusShown.clear();
         g_shown.clear();
         g_shownInfo = NkSnapshotInfo{};
         // A solve may already have published layouts before this dialog opened.
@@ -503,13 +523,12 @@ void onProgressTick() {
     // Before the early return: the trace is worth having even with no dialog
     // open to show it to.
     solverDrainKernelLog();
-    if (!refreshResultDialog()) return;
+    if (!g_resultCmd) return;
 
-    // The open question. doExecutePreview() is documented as being for commands
-    // with no dialog, with "changing command inputs" named as the normal
-    // trigger -- and we are changing one just above. Call it anyway and count
-    // what arrives; the log says which of the two is doing the work.
+    // Redraw first, then describe: the status line reports the layout on
+    // screen, so writing it before the redraw would caption the previous one.
     maybeAdvancePreview();
+    refreshResultDialog();
 
     if (g_tickCount == 1 || g_tickCount % 40 == 0)
         logLine("tick " + std::to_string(g_tickCount) + ": gen " +
