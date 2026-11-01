@@ -119,7 +119,7 @@ std::string statusText() {
     if (have) {
         os << "density " << static_cast<int>(p.density * 100.0) << " % &middot; width "
            << static_cast<long>(p.strip_width) << " mm<br/>"
-           << "separations " << p.separations << " &middot; iteration " << p.iteration;
+           << p.separations << " separation attempts";
     }
     return os.str();
 }
@@ -209,7 +209,13 @@ class ResultValidateHandler : public ValidateInputsEventHandler {
   public:
     void notify(const Ptr<ValidateInputsEventArgs>& args) override {
         ++g_validateCount;
-        if (args) args->areInputsValid(haveApplicableResult());
+        // DIAGNOSTIC, not the intended gate. The first run showed executePreview
+        // never firing while a solve ran -- and never firing is exactly what you
+        // would see if Fusion refuses to preview a dialog whose inputs are
+        // invalid, which ours were for the whole solve. Forced true to test that.
+        // Applying early is harmless meanwhile: the kernel holds no placements
+        // until it finishes, and a zero-placement write-back moves nothing.
+        if (args) args->areInputsValid(true);
     }
 };
 
@@ -333,9 +339,15 @@ void reportCompletion() {
     }
 
     if (!refreshResultDialog()) {
-        // The user closed the dialog before the engine noticed the cancel.
-        // Nothing to report to; the result is simply dropped.
-        logLine("solve finished with no result dialog open -- result discarded");
+        // Two different situations, and the trivial-solve case is not a problem:
+        // the launch is deferred by one event-loop turn, so a solve that takes
+        // less than that finishes first and the dialog reads the final state
+        // from statusText() when it opens. g_launchPending still being set is
+        // what tells the two apart.
+        if (g_launchPending)
+            logLine("solve finished before the result dialog opened -- it will show the result");
+        else
+            logLine("solve finished with no result dialog open -- result discarded");
     }
 }
 
