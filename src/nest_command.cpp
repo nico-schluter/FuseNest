@@ -502,15 +502,14 @@ class ResultDestroyHandler : public CommandEventHandler {
         logLine(hiddenReport(g_lastProfiles.size()));
         logLine(timingReport());
 
-        // Both of these outlive the command, and for the same reason: they were
-        // made in commandCreated, before any transaction existed. That is what
-        // lets the hide survive twenty preview rollbacks -- and it equally means
-        // cancel does not undo it, so the bodies must be put back by hand or a
-        // discarded nest leaves the design empty-looking.
+        // No unhide here any more. Hiding happens inside executePreview now, so
+        // Fusion's rollback restores it on every termination -- cancel,
+        // pre-emption and session end alike -- and OK is covered by the execute
+        // handler. A document write in destroy would be the same unguarded
+        // modification this change exists to remove.
         //
-        // destroy runs on every termination reason, including pre-emption, so
-        // this is the one place that always gets a chance to clean up.
-        previewHideSources(g_lastProfiles, false);
+        // The graphics still go here: they are not model geometry and not part
+        // of the transaction, so nothing else would ever drop them.
         previewClear();
 
         solverCancel();
@@ -565,19 +564,20 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
             if (!previewBuild(Application::get(), g_lastProfiles, g_previewMode, error)) {
                 logLine("preview build failed (" + error + "); falling back to move features");
                 g_previewMode = PreviewMode::MoveFeatures;
-            } else {
-                // Hidden HERE, before any preview has run. Fusion's rollback
-                // reverts what a preview did, and this happens earlier than
-                // that, so it should survive every regeneration -- turning
-                // twenty hides of a hundred bodies into one.
-                //
-                // Measured: a preview re-hid all 100 of 100 bodies every time,
-                // 20ms of a 25ms preview and 85% of its cost. The per-preview
-                // call below stays as a safety net; it is idempotent, and the
-                // hide counter reports whether it still finds anything to do.
-                logLine("hid " + std::to_string(previewHideSources(g_lastProfiles, true)) +
-                        " source bodies up front");
             }
+            // NOTHING is hidden here, deliberately. Hiding in commandCreated
+            // worked and saved 85% of the preview cost -- 100 bodies once
+            // instead of 100 twenty times, confirmed by the hide counter going
+            // to first 0 / last 0. But it is a document write outside any
+            // transaction, which Autodesk warns against, and intermittent
+            // crashes appeared in the same three iterations that introduced it
+            // here and the matching restore in destroy.
+            //
+            // So every document change is back inside executePreview or
+            // execute, where Fusion owns a transaction. Hiding moves to the
+            // preview handler, which costs ~20ms of a ~25ms preview and was
+            // measured as comfortable: tick.total averaged 10ms across a
+            // hundred bodies. Correctness over the saving.
         }
 
         g_resultCmd = cmd;
