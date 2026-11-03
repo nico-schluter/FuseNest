@@ -502,8 +502,15 @@ class ResultDestroyHandler : public CommandEventHandler {
         logLine(hiddenReport(g_lastProfiles.size()));
         logLine(timingReport());
 
-        // Custom graphics are not part of the command transaction and would
-        // outlive a cancel.
+        // Both of these outlive the command, and for the same reason: they were
+        // made in commandCreated, before any transaction existed. That is what
+        // lets the hide survive twenty preview rollbacks -- and it equally means
+        // cancel does not undo it, so the bodies must be put back by hand or a
+        // discarded nest leaves the design empty-looking.
+        //
+        // destroy runs on every termination reason, including pre-emption, so
+        // this is the one place that always gets a chance to clean up.
+        previewHideSources(g_lastProfiles, false);
         previewClear();
 
         solverCancel();
