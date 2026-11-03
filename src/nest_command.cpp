@@ -65,6 +65,52 @@ std::vector<Profile> g_lastProfiles;
 /// message box that used to carry it.
 std::string g_jobSummary;
 
+/// Everything needed to rebuild the setup dialog as the user left it.
+///
+/// Bodies are held as entityTokens rather than Ptr<Base>. A pointer would still
+/// be valid across the handoff, but a token is checkable: one that no longer
+/// resolves means that body is genuinely gone, so a changed document is
+/// reported rather than silently nesting fewer parts.
+struct SavedSetup {
+    bool valid = false;
+    double sheetHeightMm = 0.0;
+    double partSpacingMm = 0.0;
+    int rotationIndex = 1;
+    int timeBudgetSeconds = 10;
+    int workers = 4;
+    bool verboseLog = false;
+    std::vector<std::string> partTokens;
+};
+
+SavedSetup g_saved;
+
+/// A job built and ready, waiting for the engine to be free.
+///
+/// Needed because nk_cancel is graceful: the kernel finishes its current cycle
+/// and returns its best layout, which was measured at a bit over two seconds.
+/// Cancelling and immediately starting another nest is the whole point of going
+/// back to setup, so the overlap is the common case rather than an edge one, and
+/// refusing with "a nest is already running" would break the feature.
+struct PendingJob {
+    bool valid = false;
+    std::string instanceJson;
+    int budgetSeconds = 0;
+    int workers = 0;
+    int verboseLevel = 3;
+    std::vector<Profile> profiles;
+    std::string summary;
+    std::size_t itemCount = 0;
+};
+
+PendingJob g_pending;
+
+/// Set when the setup dialog is being reopened because the user cancelled out
+/// of the result dialog, as opposed to invoking FuseNest fresh.
+///
+/// The difference matters: settings are worth carrying into a fresh invocation,
+/// but silently reselecting bodies someone did not pick would be startling.
+bool g_restoreSelections = false;
+
 /// The live result command, while one is open. A CustomEvent handler gets no
 /// Command pointer and ui->activeCommand() yields only an id string, so the
 /// only way to reach the open dialog is to stash it here on creation. Cleared
@@ -141,6 +187,22 @@ bool g_previewClaimed = false;
 /// was already running before it opened.
 void maybeAdvancePreview();
 
+/// Reopens the setup dialog with the last job restored. Called from the result
+/// dialog's destroy handler, so the same question applies as for the forward
+/// direction: starting a command while Fusion tears down another. The forward
+/// path proved the direct call works, so this uses it too and logs if it fails.
+void reopenSetup() {
+    g_restoreSelections = true;
+    if (g_cmdDef && g_cmdDef->execute()) {
+        logLine("setup dialog reopened for another pass");
+        return;
+    }
+    std::string err;
+    if (Ptr<Application> app = Application::get()) app->getLastError(&err);
+    logLine("could not reopen the setup dialog: " + err);
+    g_restoreSelections = false;
+}
+
 const char* phaseLabel(std::uint32_t phase) {
     switch (phase) {
         case 1: return "Exploring";
@@ -171,6 +233,11 @@ std::string statusText() {
     const bool have = solverProgress(p);
 
     std::ostringstream os;
+    if (g_pending.valid) {
+        // Deliberately the only thing shown: the layout still on the kernel's
+        // side belongs to the abandoned solve, not to this job.
+        return "<b>Starting</b><br/>waiting for the cancelled nest to stop";
+    }
     if (!g_solveFinished) {
         os << "<b>" << (have ? phaseLabel(p.phase) : "Starting") << "</b><br/>";
     } else if (solverReturnCode() != 0) {
@@ -232,6 +299,33 @@ RotationMode rotationFromIndex(int index) {
         case 2: return RotationMode::Quarter;
         default: return RotationMode::Continuous;
     }
+}
+
+/// Stashes the dialog exactly as the user left it, so cancelling out of the
+/// result dialog can put it back rather than making them set it up again.
+void rememberSetup(const Ptr<CommandInputs>& inputs, const NestRequest& req) {
+    if (!inputs) return;
+
+    g_saved = SavedSetup{};
+    g_saved.sheetHeightMm = req.sheetHeightMm;
+    g_saved.partSpacingMm = req.partSpacingMm;
+    g_saved.timeBudgetSeconds = req.timeBudgetSeconds;
+    g_saved.workers = req.workers;
+    g_saved.verboseLog = req.verboseLog;
+    if (Ptr<DropDownCommandInput> d = inputs->itemById(kInRotation))
+        if (Ptr<ListItem> item = d->selectedItem()) g_saved.rotationIndex = item->index();
+
+    for (const Ptr<Base>& e : req.parts) {
+        // Tokens live on the concrete type, not on Base. Only solid bodies can
+        // be selected, so this is the only cast needed.
+        if (Ptr<BRepBody> body = e ? e->cast<BRepBody>() : nullptr) {
+            const std::string token = body->entityToken();
+            if (!token.empty()) g_saved.partTokens.push_back(token);
+        }
+    }
+    g_saved.valid = true;
+    logLine("remembered setup: " + std::to_string(g_saved.partTokens.size()) + " of " +
+            std::to_string(req.parts.size()) + " parts tokenised");
 }
 
 NestRequest readInputs(const Ptr<CommandInputs>& inputs) {
@@ -361,9 +455,19 @@ class ResultDestroyHandler : public CommandEventHandler {
 
         // Unconditional: a dialog that is gone has nobody left to show progress
         // to, so the engine has no reason to keep burning cores. On OK the
-        // solve has already finished and this is a no-op.
+        // solve is already over and this is a no-op.
         solverCancel();
         g_resultCmd = nullptr;
+
+        // Cancel means "not this layout", and the reason it is not this layout
+        // is almost always the setup -- wrong spacing, wrong sheet, wrong
+        // rotation. So Cancel goes back to setup rather than simply ending,
+        // which is also what makes iterating cheap.
+        //
+        // Only on a real cancel. Pre-empted means the user reached for another
+        // tool and would not thank us for a dialog; completed and session-ending
+        // speak for themselves.
+        if (why == CancelledTerminationReason && g_saved.valid) reopenSetup();
     }
 };
 
@@ -457,6 +561,31 @@ LaunchHandler g_launchHandler;
 
 // --- engine callbacks ----------------------------------------------------
 
+/// Starts a job and makes everything that describes a solve refer to it.
+///
+/// One place, because the pieces have to move together: the profiles a
+/// placement's item_id indexes into, and the layout the preview is drawing. A
+/// stale layout paired with fresh profiles would move the wrong bodies.
+bool beginJob(const PendingJob& job, std::string& error) {
+    g_lastProfiles = job.profiles;
+    g_jobSummary = job.summary;
+
+    g_shown.clear();
+    g_shownInfo = NkSnapshotInfo{};
+    g_previewedGeneration = 0;
+    g_lastPreviewAt = {};
+    g_statusShown.clear();
+    g_solveFinished = false;
+
+    solverSetLogLevel(job.verboseLevel);
+    if (!solverStart(job.instanceJson, job.budgetSeconds, job.workers, error)) return false;
+
+    logLine("solve started: " + std::to_string(job.itemCount) + " items, " +
+            std::to_string(job.workers) + " workers, " + std::to_string(job.budgetSeconds) +
+            " s ceiling");
+    return true;
+}
+
 /// Picks up a newer layout from the kernel and asks Fusion to redraw, but only
 /// when there is something better to show and enough time has passed to be
 /// worth a full write-back.
@@ -482,6 +611,9 @@ bool worthRedrawing(const std::vector<NkPlacement>& shown, const NkSnapshotInfo&
 
 void maybeAdvancePreview() {
     if (!g_resultCmd) return;
+    // The published layout belongs to the solve being abandoned, and the
+    // profiles it indexes into have already been replaced.
+    if (g_pending.valid) return;
 
     const std::uint64_t gen = solverSnapshotGeneration();
     if (gen == g_previewedGeneration) return;
@@ -559,6 +691,28 @@ void onProgressTick() {
 
 /// Main thread, once, however the solve ended.
 void reportCompletion() {
+    // A queued job means this completion belongs to a solve the user already
+    // walked away from. Hand straight over instead of reporting a result nobody
+    // asked for.
+    if (g_pending.valid) {
+        const PendingJob job = g_pending;
+        g_pending = PendingJob{};
+        solverDrainKernelLog();
+        logLine("cancelled solve drained; starting the queued job");
+
+        std::string error;
+        if (!beginJob(job, error)) {
+            logLine("queued job failed to start: " + error);
+            // Otherwise the dialog sits claiming it is about to start something.
+            g_solveFinished = true;
+            if (Ptr<Application> app = Application::get())
+                if (Ptr<UserInterface> ui = app->userInterface())
+                    ui->messageBox("Could not start nesting:\n" + error, "FuseNest");
+        }
+        refreshResultDialog();
+        return;
+    }
+
     g_solveFinished = true;
     // The tail of the trace: the ticker has already stopped, so the lines from
     // the final cycle and the phase summaries are still sitting in the buffer.
@@ -614,6 +768,8 @@ class ExecuteHandler : public CommandEventHandler {
         logLine("execute:");
         logLine(req.describe());
 
+        rememberSetup(cmd ? cmd->commandInputs() : nullptr, req);
+
         ExtractOptions opts;
         const ExtractResult extracted = extractProfiles(app, req.parts, opts);
 
@@ -661,21 +817,36 @@ class ExecuteHandler : public CommandEventHandler {
             return;
         }
 
-        g_solveFinished = false;
-        // 4 = debug, 3 = info. Set before the solve so the import and the first
-        // cycle are already covered.
-        solverSetLogLevel(req.verboseLog ? 4 : 3);
+        PendingJob pending;
+        pending.valid = true;
+        pending.instanceJson = input.json;
+        pending.budgetSeconds = req.timeBudgetSeconds;
+        pending.workers = req.workers;
+        // 4 = debug, 3 = info.
+        pending.verboseLevel = req.verboseLog ? 4 : 3;
+        pending.profiles = extracted.profiles;
+        pending.summary = g_jobSummary;
+        pending.itemCount = input.itemCount;
+
+        if (solverBusy()) {
+            // A previous solve is still winding down from a cancel. Queue this
+            // one and let the completion handler start it; the dialog opens
+            // either way and says what it is waiting for.
+            solverCancel();
+            g_pending = pending;
+            logLine("engine still busy; job queued behind the cancelled solve");
+            g_launchPending = true;
+            return;
+        }
+
         std::string startError;
-        if (!solverStart(input.json, req.timeBudgetSeconds, req.workers, startError)) {
+        if (!beginJob(pending, startError)) {
             logLine("solverStart failed: " + startError);
             if (ui)
                 ui->messageBox("Could not start nesting:\n" + startError + "\n\nLog: " + logPath(),
                                "FuseNest");
             return;
         }
-        logLine("solve started: " + std::to_string(input.itemCount) + " items, " +
-                std::to_string(req.workers) + " workers, " +
-                std::to_string(req.timeBudgetSeconds) + " s budget");
 
         // The dialog cannot open from here -- this command still owns the UI.
         g_launchPending = true;
@@ -706,6 +877,78 @@ class DestroyHandler : public CommandEventHandler {
             logLine("direct launch refused (" + err + "); deferring via CustomEvent");
             app->fireCustomEvent(kLaunchEventId);
         }
+    }
+};
+
+/// Puts the last job's numbers back. Applies to a fresh invocation too: the
+/// settings someone chose last time are a far better default than ours.
+void restoreSetupValues(const Ptr<CommandInputs>& inputs) {
+    if (!g_saved.valid || !inputs) return;
+
+    if (Ptr<ValueCommandInput> v = inputs->itemById(kInSheetHeight))
+        v->value(g_saved.sheetHeightMm * kMmToCm);
+    if (Ptr<ValueCommandInput> v = inputs->itemById(kInSpacing))
+        v->value(g_saved.partSpacingMm * kMmToCm);
+    if (Ptr<DropDownCommandInput> d = inputs->itemById(kInRotation))
+        if (Ptr<ListItems> items = d->listItems())
+            if (g_saved.rotationIndex >= 0 && g_saved.rotationIndex < items->count())
+                items->item(g_saved.rotationIndex)->isSelected(true);
+    if (Ptr<IntegerSpinnerCommandInput> sp = inputs->itemById(kInBudget))
+        sp->value(g_saved.timeBudgetSeconds);
+    if (Ptr<IntegerSpinnerCommandInput> sp = inputs->itemById(kInWorkers))
+        sp->value(g_saved.workers);
+    if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInVerbose))
+        b->value(g_saved.verboseLog);
+}
+
+/// Reselects the bodies the last job used, by token.
+///
+/// Only when coming back from the result dialog. A token that fails to resolve
+/// means the body is gone, which is worth saying out loud -- it is the one way
+/// the handoff can lose work, and silence would look like the nest shrinking
+/// for no reason.
+void restoreSetupSelections(const Ptr<CommandInputs>& inputs) {
+    if (!g_restoreSelections || !g_saved.valid || !inputs) return;
+    g_restoreSelections = false;
+
+    Ptr<SelectionCommandInput> sel = inputs->itemById(kInParts);
+    Ptr<Application> app = Application::get();
+    Ptr<Design> design = app ? app->activeProduct()->cast<Design>() : nullptr;
+    if (!sel || !design) return;
+
+    int restored = 0, missing = 0, ambiguous = 0;
+    for (const std::string& token : g_saved.partTokens) {
+        std::vector<Ptr<Base>> found = design->findEntityByToken(token);
+        if (found.empty()) {
+            ++missing;
+            continue;
+        }
+        // One token can resolve to several proxies of the same body across
+        // occurrences. The token came from the entity we were handed, so the
+        // first match is the one we want; a count above one is worth knowing
+        // about but not worth refusing over.
+        if (found.size() > 1) ++ambiguous;
+        if (sel->addSelection(found[0])) ++restored;
+    }
+
+    logLine("restored " + std::to_string(restored) + " of " +
+            std::to_string(g_saved.partTokens.size()) + " parts" +
+            (missing ? ", " + std::to_string(missing) + " no longer exist" : "") +
+            (ambiguous ? ", " + std::to_string(ambiguous) + " resolved to several entities" : ""));
+
+    if (missing && app)
+        if (Ptr<UserInterface> ui = app->userInterface())
+            ui->messageBox(std::to_string(missing) +
+                               " of the previously selected bodies no longer exist and could "
+                               "not be reselected.",
+                           "FuseNest");
+}
+
+class ActivateHandler : public CommandEventHandler {
+  public:
+    void notify(const Ptr<CommandEventArgs>& args) override {
+        Ptr<Command> cmd = args ? args->command() : nullptr;
+        restoreSetupSelections(cmd ? cmd->commandInputs() : nullptr);
     }
 };
 
@@ -770,9 +1013,14 @@ class CreatedHandler : public CommandCreatedEventHandler {
         inputs->addIntegerSpinnerCommandInput(kInWorkers, "Workers", 1, 64, 1, 4);
         inputs->addBoolValueInput(kInVerbose, "Verbose log", true, "", false);
 
+        restoreSetupValues(inputs);
+
         cmd->validateInputs()->add(&validate_);
         cmd->execute()->add(&execute_);
         cmd->destroy()->add(&destroy_);
+        // Selections are restored on activate, not here: a selection input
+        // cannot take entities until the dialog is actually up.
+        cmd->activate()->add(&activate_);
         logLine("commandCreated: dialog built");
     }
 
@@ -780,6 +1028,7 @@ class CreatedHandler : public CommandCreatedEventHandler {
     ValidateHandler validate_;
     ExecuteHandler execute_;
     DestroyHandler destroy_;
+    ActivateHandler activate_;
 };
 
 CreatedHandler g_createdHandler;
