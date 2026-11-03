@@ -2,6 +2,7 @@
 
 #include "log.h"
 #include "nest_request.h"
+#include "preview.h"
 #include "profile.h"
 #include "solver.h"
 #include "timing.h"
@@ -45,6 +46,8 @@ const char* kInRotation = "fnRotation";
 const char* kInBudget = "fnBudget";
 const char* kInWorkers = "fnWorkers";
 const char* kInVerbose = "fnVerbose";
+const char* kInPreviewMode = "fnPreviewMode";
+const char* kInBenchmark = "fnBenchmark";
 const char* kInStatus = "fnStatus";
 const char* kInJob = "fnJob";
 
@@ -113,6 +116,13 @@ Ptr<Command> g_resultCmd;
 
 bool g_launchPending = false;
 bool g_solveFinished = false;
+
+/// How the live layout is drawn. Move features are exact and make Apply free,
+/// but cost one timeline insert per body; the graphics modes cost a matrix
+/// assignment per body and need an explicit write-back on Apply.
+PreviewMode g_previewMode = PreviewMode::MoveFeatures;
+bool g_benchmarkRequested = false;
+bool g_benchmarkDone = false;
 
 // Diagnostics for the one open question in this design: what actually makes
 // Fusion re-run executePreview on a dialog whose inputs the user is not
@@ -364,6 +374,10 @@ class ResultExecuteHandler : public CommandEventHandler {
             return;
         }
 
+        // The graphics modes leave the sources hidden and the preview unclaimed,
+        // so OK lands here and has to put them back before moving them.
+        previewHideSources(g_lastProfiles, false);
+
         const WriteBackResult wb = applyPlacements(app, g_lastProfiles, g_shown);
         logLine("applied: " + std::to_string(wb.moved) + " moved, " +
                 std::to_string(wb.skipped) + " skipped");
@@ -394,6 +408,17 @@ class ResultPreviewHandler : public CommandEventHandler {
         // Timeline grouping is skipped: these moves are about to be discarded,
         // and grouping them costs a timeline operation per preview. The preview
         // that OK keeps is regrouped by the execute path.
+        if (g_previewMode != PreviewMode::MoveFeatures) {
+            // Re-hidden every time: visibility is a model change, so Fusion's
+            // rollback makes the bodies visible again before each regeneration.
+            previewHideSources(g_lastProfiles, true);
+            if (previewShow(g_shown) > 0) ++g_previewApplied;
+            // Custom graphics are not a model change, so there is nothing for
+            // Fusion to keep. The execute handler does the real write-back.
+            if (args) args->isValidResult(false);
+            return;
+        }
+
         const WriteBackResult wb =
             applyPlacements(Application::get(), g_lastProfiles, g_shown, /*groupTimeline=*/false);
         if (wb.moved > 0) {
@@ -434,6 +459,10 @@ class ResultDestroyHandler : public CommandEventHandler {
         // to, so the engine has no reason to keep burning cores. On OK the
         // solve is already over and this is a no-op.
         logLine(timingReport());
+
+        // Custom graphics are not part of the command transaction and would
+        // outlive a cancel.
+        previewClear();
 
         solverCancel();
         g_resultCmd = nullptr;
@@ -481,6 +510,14 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
         cmd->executePreview()->add(&preview_);
         cmd->execute()->add(&execute_);
         cmd->destroy()->add(&destroy_);
+
+        if (g_previewMode != PreviewMode::MoveFeatures) {
+            std::string error;
+            if (!previewBuild(Application::get(), g_lastProfiles, g_previewMode, error)) {
+                logLine("preview build failed (" + error + "); falling back to move features");
+                g_previewMode = PreviewMode::MoveFeatures;
+            }
+        }
 
         g_resultCmd = cmd;
         g_tickCount = g_previewCount = 0;
@@ -601,6 +638,18 @@ void maybeAdvancePreview() {
     g_shown = std::move(fresh);
     g_shownInfo = info;
     g_lastPreviewAt = now;
+
+    if (g_benchmarkRequested && !g_benchmarkDone) {
+        g_benchmarkDone = true;
+        previewBenchmark(Application::get(), g_lastProfiles, g_shown);
+        // Rebuilt because the benchmark tore down its own geometry, which is
+        // the same geometry the live preview was using.
+        if (g_previewMode != PreviewMode::MoveFeatures) {
+            std::string error;
+            if (!previewBuild(Application::get(), g_lastProfiles, g_previewMode, error))
+                logLine("preview rebuild after benchmark failed: " + error);
+        }
+    }
 
     ++g_toggles;
     // No separate trigger. Writing an input is what makes Fusion regenerate the
@@ -723,6 +772,18 @@ class ExecuteHandler : public CommandEventHandler {
         logLine(req.describe());
 
         rememberSetup(cmd ? cmd->commandInputs() : nullptr, req);
+
+        if (Ptr<CommandInputs> in = cmd ? cmd->commandInputs() : nullptr) {
+            if (Ptr<DropDownCommandInput> d = in->itemById(kInPreviewMode))
+                if (Ptr<ListItem> item = d->selectedItem())
+                    g_previewMode = item->index() == 0   ? PreviewMode::MoveFeatures
+                                    : item->index() == 1 ? PreviewMode::TempBodies
+                                                         : PreviewMode::Outlines;
+            if (Ptr<BoolValueCommandInput> b = in->itemById(kInBenchmark))
+                g_benchmarkRequested = b->value();
+        }
+        g_benchmarkDone = false;
+        logLine(std::string("preview mode: ") + previewModeLabel(g_previewMode));
 
         ExtractOptions opts;
         const ExtractResult extracted = extractProfiles(app, req.parts, opts);
@@ -964,6 +1025,15 @@ class CreatedHandler : public CommandCreatedEventHandler {
         // default for a latency-sensitive interactive run.
         inputs->addIntegerSpinnerCommandInput(kInWorkers, "Workers", 1, 64, 1, 4);
         inputs->addBoolValueInput(kInVerbose, "Verbose log", true, "", false);
+
+        Ptr<DropDownCommandInput> mode = inputs->addDropDownCommandInput(
+            kInPreviewMode, "Preview using", DropDownStyles::TextListDropDownStyle);
+        if (Ptr<ListItems> items = mode ? mode->listItems() : nullptr) {
+            items->add(previewModeLabel(PreviewMode::MoveFeatures), true);
+            items->add(previewModeLabel(PreviewMode::TempBodies), false);
+            items->add(previewModeLabel(PreviewMode::Outlines), false);
+        }
+        inputs->addBoolValueInput(kInBenchmark, "Benchmark preview modes", true, "", false);
 
         restoreSetupValues(inputs);
 

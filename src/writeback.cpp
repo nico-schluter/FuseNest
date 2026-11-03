@@ -16,11 +16,8 @@ namespace {
 
 constexpr double kMmToCm = 0.1;
 
-/// Rotation about Z through the origin, then a translation in XY.
-///
-/// This is valid precisely because the outline was projected onto the XY plane
-/// along Z: the body's XY silhouette transforms exactly as the polygon did, and
-/// Z is left alone.
+}  // namespace
+
 Ptr<Matrix3D> placementMatrix(const NkPlacement& p) {
     Ptr<Matrix3D> m = Matrix3D::create();
     if (!m) return nullptr;
@@ -33,8 +30,6 @@ Ptr<Matrix3D> placementMatrix(const NkPlacement& p) {
     if (!m->translation(Vector3D::create(p.tx * kMmToCm, p.ty * kMmToCm, 0.0))) return nullptr;
     return m;
 }
-
-}  // namespace
 
 WriteBackResult applyPlacements(const Ptr<Application>& app, const std::vector<Profile>& profiles,
                                 const std::vector<NkPlacement>& placements, bool groupTimeline) {

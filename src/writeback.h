@@ -24,6 +24,14 @@
 
 namespace fusenest {
 
+/// Rotation about Z through the origin, then a translation in XY.
+///
+/// Valid precisely because the outline was projected onto XY along Z: the
+/// body's XY silhouette transforms exactly as the polygon did, and Z is left
+/// alone. Shared with the preview so a drawn layout and an applied one cannot
+/// disagree about what a placement means.
+adsk::core::Ptr<adsk::core::Matrix3D> placementMatrix(const NkPlacement& p);
+
 struct WriteBackResult {
     int moved = 0;
     int skipped = 0;

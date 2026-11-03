@@ -60,6 +60,7 @@ add_library(${ADDIN_NAME} SHARED
     src/log.cpp
     src/nest_command.cpp
     src/nest_request.cpp
+    src/preview.cpp
     src/profile.cpp
     src/solver.cpp
     src/solver_input.cpp
