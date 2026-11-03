@@ -27,15 +27,21 @@ namespace fusenest {
 
 enum class PreviewMode {
     /// The model itself. Exact, and Fusion's rollback plus isValidResult make
-    /// Apply free -- but one timeline insert per body.
+    /// Apply free -- but one timeline insert per body, measured at 12ms each,
+    /// so 104 parts froze the main thread for 17.4 seconds across one solve.
+    /// Kept as a reference and an escape hatch, not as a default.
     MoveFeatures,
     /// TemporaryBRepManager copies of the real bodies, drawn as custom
-    /// graphics. Looks identical to the real thing; cost is one body copy each
-    /// at build time.
+    /// graphics. The default, and measured at 3.21ms per redraw for 104 parts
+    /// against 1241ms for move features -- about 390x. Indistinguishable from
+    /// Outlines per redraw, because the cost is the transform assignment rather
+    /// than the geometry behind it, so there is no reason to draw anything less
+    /// faithful than a copy of the real body.
     TempBodies,
-    /// The extracted silhouettes drawn as closed line strips. Cheapest to
-    /// build, and shows what the solver actually reasoned about rather than
-    /// what the body looks like.
+    /// The extracted silhouettes drawn as closed line strips. 4ms to build
+    /// against 24ms, which buys nothing worth having, but it shows what the
+    /// solver actually reasoned about rather than what the body looks like --
+    /// which is the better view when a silhouette looks wrong.
     Outlines,
 };
 

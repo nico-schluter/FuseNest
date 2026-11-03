@@ -120,7 +120,7 @@ bool g_solveFinished = false;
 /// How the live layout is drawn. Move features are exact and make Apply free,
 /// but cost one timeline insert per body; the graphics modes cost a matrix
 /// assignment per body and need an explicit write-back on Apply.
-PreviewMode g_previewMode = PreviewMode::MoveFeatures;
+PreviewMode g_previewMode = PreviewMode::TempBodies;
 bool g_benchmarkRequested = false;
 bool g_benchmarkDone = false;
 
@@ -776,9 +776,9 @@ class ExecuteHandler : public CommandEventHandler {
         if (Ptr<CommandInputs> in = cmd ? cmd->commandInputs() : nullptr) {
             if (Ptr<DropDownCommandInput> d = in->itemById(kInPreviewMode))
                 if (Ptr<ListItem> item = d->selectedItem())
-                    g_previewMode = item->index() == 0   ? PreviewMode::MoveFeatures
-                                    : item->index() == 1 ? PreviewMode::TempBodies
-                                                         : PreviewMode::Outlines;
+                    g_previewMode = item->index() == 0   ? PreviewMode::TempBodies
+                                    : item->index() == 1 ? PreviewMode::Outlines
+                                                         : PreviewMode::MoveFeatures;
             if (Ptr<BoolValueCommandInput> b = in->itemById(kInBenchmark))
                 g_benchmarkRequested = b->value();
         }
@@ -1029,9 +1029,9 @@ class CreatedHandler : public CommandCreatedEventHandler {
         Ptr<DropDownCommandInput> mode = inputs->addDropDownCommandInput(
             kInPreviewMode, "Preview using", DropDownStyles::TextListDropDownStyle);
         if (Ptr<ListItems> items = mode ? mode->listItems() : nullptr) {
-            items->add(previewModeLabel(PreviewMode::MoveFeatures), true);
-            items->add(previewModeLabel(PreviewMode::TempBodies), false);
+            items->add(previewModeLabel(PreviewMode::TempBodies), true);
             items->add(previewModeLabel(PreviewMode::Outlines), false);
+            items->add(previewModeLabel(PreviewMode::MoveFeatures), false);
         }
         inputs->addBoolValueInput(kInBenchmark, "Benchmark preview modes", true, "", false);
 
