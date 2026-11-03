@@ -143,8 +143,35 @@ long g_tickCount = 0;
 long g_previewCount = 0;
 long g_previewApplied = 0;
 
-/// Bodies the last preview actually had to hide. See previewHideSources.
-int g_hiddenPerPreview = -1;
+/// How many bodies each preview actually had to hide, across the dialog's life.
+///
+/// The spread is what answers the question, not any single sample: all of them
+/// every time means Fusion's rollback restores visibility before each
+/// regeneration and the work is real, none after the first means it persists and
+/// the hiding belongs outside the preview. A mixture means something else is
+/// toggling visibility and the assumption is wrong in a third way.
+int g_hiddenFirst = -1;
+int g_hiddenLast = -1;
+int g_hiddenMin = -1;
+int g_hiddenMax = -1;
+
+void noteHidden(int changed) {
+    g_hiddenLast = changed;
+    if (g_hiddenFirst < 0) {
+        g_hiddenFirst = g_hiddenMin = g_hiddenMax = changed;
+        return;
+    }
+    g_hiddenMin = std::min(g_hiddenMin, changed);
+    g_hiddenMax = std::max(g_hiddenMax, changed);
+}
+
+std::string hiddenReport(std::size_t profileCount) {
+    if (g_hiddenFirst < 0) return "hidden: never asked";
+    std::ostringstream os;
+    os << "hidden per preview of " << profileCount << " bodies: first " << g_hiddenFirst
+       << ", last " << g_hiddenLast << ", min " << g_hiddenMin << ", max " << g_hiddenMax;
+    return os.str();
+}
 
 /// The layout the preview is currently drawing, and where it came from. Held so
 /// the preview and a later Apply use the same one even though the kernel keeps
@@ -425,7 +452,7 @@ class ResultPreviewHandler : public CommandEventHandler {
         if (g_previewMode != PreviewMode::MoveFeatures) {
             // Re-hidden every time: visibility is a model change, so Fusion's
             // rollback makes the bodies visible again before each regeneration.
-            g_hiddenPerPreview = previewHideSources(g_lastProfiles, true);
+            noteHidden(previewHideSources(g_lastProfiles, true));
             if (previewShow(g_shown) > 0) ++g_previewApplied;
             // Custom graphics are not a model change, so there is nothing for
             // Fusion to keep. The execute handler does the real write-back.
@@ -472,6 +499,7 @@ class ResultDestroyHandler : public CommandEventHandler {
         // Unconditional: a dialog that is gone has nobody left to show progress
         // to, so the engine has no reason to keep burning cores. On OK the
         // solve is already over and this is a no-op.
+        logLine(hiddenReport(g_lastProfiles.size()));
         logLine(timingReport());
 
         // Custom graphics are not part of the command transaction and would
@@ -540,6 +568,7 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
         g_previewedGeneration = 0;
         g_lastPreviewAt = {};
         g_toggles = g_skippedRedraws = 0;
+        g_hiddenFirst = g_hiddenLast = g_hiddenMin = g_hiddenMax = -1;
         timingReset();
         g_statusShown.clear();
         g_shown.clear();
@@ -703,8 +732,7 @@ void onProgressTick() {
                 std::to_string(g_shownInfo.generation) + ", redraws " +
                 std::to_string(g_toggles) + " (" + std::to_string(g_skippedRedraws) +
                 " skipped as invisible), previews " + std::to_string(g_previewCount) +
-                ", bodies re-hidden by the last preview " + std::to_string(g_hiddenPerPreview) +
-                "\n" + timingReport());
+                "\n" + hiddenReport(g_lastProfiles.size()) + "\n" + timingReport());
 }
 
 /// Main thread, once, however the solve ended.
