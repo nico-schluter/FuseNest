@@ -74,6 +74,11 @@ Ptr<Command> g_resultCmd;
 bool g_launchPending = false;
 bool g_solveFinished = false;
 
+/// Set when the result dialog has been asked for but has not appeared. The
+/// direct launch is the path being tested; this is what notices if it silently
+/// did nothing, so a solve cannot end up running with nothing watching it.
+bool g_awaitingResultDialog = false;
+
 // Diagnostics for the one open question in this design: what actually makes
 // Fusion re-run executePreview on a dialog whose inputs the user is not
 // touching. Counted rather than logged per-event -- at a 150 ms tick a short
@@ -431,10 +436,12 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
 ResultCreatedHandler g_resultCreatedHandler;
 
 /// Opens the result dialog, one event-loop turn after command 1 has gone.
+/// The fallback path, one event-loop turn later than destroy. Kept only until
+/// the direct launch has proven itself.
 class LaunchHandler : public CustomEventHandler {
   public:
     void notify(const Ptr<CustomEventArgs>& /*args*/) override {
-        if (!g_resultDef) return;
+        if (!g_resultDef || g_resultCmd) return;
         if (!g_resultDef->execute()) {
             std::string err;
             if (Ptr<Application> app = Application::get()) app->getLastError(&err);
@@ -523,7 +530,19 @@ void onProgressTick() {
     // Before the early return: the trace is worth having even with no dialog
     // open to show it to.
     solverDrainKernelLog();
-    if (!g_resultCmd) return;
+
+    if (!g_resultCmd) {
+        // execute() can report success without a dialog ever appearing. Give it
+        // a couple of ticks, then fall back rather than leave a solve running
+        // unwatched and unacceptable.
+        if (g_awaitingResultDialog && g_tickCount > 2) {
+            g_awaitingResultDialog = false;
+            logLine("direct launch reported success but no dialog appeared; using the hop");
+            if (Ptr<Application> app = Application::get()) app->fireCustomEvent(kLaunchEventId);
+        }
+        return;
+    }
+    g_awaitingResultDialog = false;
 
     // Redraw first, then describe: the status line reports the layout on
     // screen, so writing it before the redraw would caption the previous one.
@@ -668,7 +687,25 @@ class DestroyHandler : public CommandEventHandler {
     void notify(const Ptr<CommandEventArgs>& /*args*/) override {
         if (!g_launchPending) return;
         g_launchPending = false;
-        if (Ptr<Application> app = Application::get()) app->fireCustomEvent(kLaunchEventId);
+        g_awaitingResultDialog = true;
+
+        // Straight from destroy, no CustomEvent hop. The hop was reasoning, not
+        // a finding: starting a command while Fusion is still tearing the
+        // previous one down looked like it ought to be too early. If it is,
+        // execute() returns false and the hop below still runs -- and the tick
+        // handler notices the other failure mode, where it returns true and no
+        // dialog appears.
+        if (g_resultDef && g_resultDef->execute()) {
+            logLine("result dialog launched directly from destroy");
+            return;
+        }
+
+        std::string err;
+        if (Ptr<Application> app = Application::get()) {
+            app->getLastError(&err);
+            logLine("direct launch refused (" + err + "); deferring via CustomEvent");
+            app->fireCustomEvent(kLaunchEventId);
+        }
     }
 };
 
