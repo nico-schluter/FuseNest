@@ -131,11 +131,26 @@ int previewShow(const std::vector<NkPlacement>& placements) {
     return placed;
 }
 
-void previewHideSources(const std::vector<Profile>& profiles, bool hidden) {
+int previewHideSources(const std::vector<Profile>& profiles, bool hidden) {
     ScopedTime _t("preview.hideSources");
-    for (const Profile& profile : profiles)
-        if (Ptr<BRepBody> body = profile.source ? profile.source->cast<BRepBody>() : nullptr)
-            body->isLightBulbOn(!hidden);
+    // Writes only where the state differs. This is worth doing on its own --
+    // hiding is 21ms of a 25ms preview on a hundred bodies, seven times the
+    // cost of the drawing it serves -- but it also settles an assumption: this
+    // is re-done every preview because Fusion's rollback is believed to make
+    // the bodies visible again before each regeneration, which was never
+    // actually checked. The returned count says so directly. A hundred every
+    // time means the rollback does restore visibility and the work is real; a
+    // hundred once and then zero means it persists and the hiding belongs
+    // outside the preview entirely.
+    int changed = 0;
+    for (const Profile& profile : profiles) {
+        Ptr<BRepBody> body = profile.source ? profile.source->cast<BRepBody>() : nullptr;
+        if (!body) continue;
+        if (body->isLightBulbOn() == !hidden) continue;
+        body->isLightBulbOn(!hidden);
+        ++changed;
+    }
+    return changed;
 }
 
 void previewClear() {

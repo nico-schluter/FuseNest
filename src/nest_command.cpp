@@ -83,11 +83,22 @@ SavedSetup g_saved;
 
 /// A job built and ready, waiting for the engine to be free.
 ///
-/// Needed because nk_cancel is graceful: the kernel finishes its current cycle
-/// and returns its best layout, which was measured at a bit over two seconds.
-/// Cancelling and immediately starting another nest is the whole point of going
-/// back to setup, so the overlap is the common case rather than an edge one, and
-/// refusing with "a nest is already running" would break the feature.
+/// nk_cancel is graceful -- the kernel finishes its current cycle and returns
+/// its best layout -- so a new job can in principle arrive before the old solve
+/// has stopped, and solverStart would refuse it with "a nest is already
+/// running".
+///
+/// In practice this never happens, and the measurement is worth recording so
+/// nobody chases it again. Across thirteen round trips on a hundred bodies the
+/// drain took 52-230ms while the fastest human round trip through the setup
+/// dialog was 535ms: the gap cannot be closed by clicking faster. Profile
+/// extraction, which was the suspected reason, is only 35-67ms and far too
+/// quick to be covering it.
+///
+/// It stays as a correctness guard rather than a performance one. A long
+/// separation on a much larger instance polls the cancel flag less often, and
+/// the failure it prevents -- an error dialog on the path built for fast
+/// iteration -- is worse than the cost of a branch that is almost never taken.
 struct PendingJob {
     bool valid = false;
     std::string instanceJson;
@@ -131,6 +142,9 @@ bool g_benchmarkDone = false;
 long g_tickCount = 0;
 long g_previewCount = 0;
 long g_previewApplied = 0;
+
+/// Bodies the last preview actually had to hide. See previewHideSources.
+int g_hiddenPerPreview = -1;
 
 /// The layout the preview is currently drawing, and where it came from. Held so
 /// the preview and a later Apply use the same one even though the kernel keeps
@@ -411,7 +425,7 @@ class ResultPreviewHandler : public CommandEventHandler {
         if (g_previewMode != PreviewMode::MoveFeatures) {
             // Re-hidden every time: visibility is a model change, so Fusion's
             // rollback makes the bodies visible again before each regeneration.
-            previewHideSources(g_lastProfiles, true);
+            g_hiddenPerPreview = previewHideSources(g_lastProfiles, true);
             if (previewShow(g_shown) > 0) ++g_previewApplied;
             // Custom graphics are not a model change, so there is nothing for
             // Fusion to keep. The execute handler does the real write-back.
@@ -688,8 +702,9 @@ void onProgressTick() {
         logLine("tick " + std::to_string(g_tickCount) + ": gen " +
                 std::to_string(g_shownInfo.generation) + ", redraws " +
                 std::to_string(g_toggles) + " (" + std::to_string(g_skippedRedraws) +
-                " skipped as invisible), previews " + std::to_string(g_previewCount) + "\n" +
-                timingReport());
+                " skipped as invisible), previews " + std::to_string(g_previewCount) +
+                ", bodies re-hidden by the last preview " + std::to_string(g_hiddenPerPreview) +
+                "\n" + timingReport());
 }
 
 /// Main thread, once, however the solve ended.

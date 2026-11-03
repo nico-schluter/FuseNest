@@ -60,7 +60,10 @@ int previewShow(const std::vector<NkPlacement>& placements);
 ///
 /// Safe to leave hidden on cancel: visibility is a document change, so it goes
 /// back with the preview transaction if the result is not accepted.
-void previewHideSources(const std::vector<Profile>& profiles, bool hidden);
+///
+/// Returns how many bodies actually had to change, which is how we find out
+/// whether re-hiding on every preview is necessary work or a no-op.
+int previewHideSources(const std::vector<Profile>& profiles, bool hidden);
 
 /// Drops the graphics. Must run before the dialog closes -- custom graphics are
 /// NOT part of the command transaction and would survive a cancel.
