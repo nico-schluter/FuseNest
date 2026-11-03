@@ -120,7 +120,6 @@ bool g_solveFinished = false;
 // solve produces a hundred of each.
 long g_tickCount = 0;
 long g_previewCount = 0;
-long g_validateCount = 0;
 long g_previewApplied = 0;
 
 /// The layout the preview is currently drawing, and where it came from. Held so
@@ -404,7 +403,6 @@ class ResultPreviewHandler : public CommandEventHandler {
 class ResultValidateHandler : public ValidateInputsEventHandler {
   public:
     void notify(const Ptr<ValidateInputsEventArgs>& args) override {
-        ++g_validateCount;
         // Validity gates the preview as well as the OK button: while this was
         // false for the duration of a solve, executePreview never fired once.
         // Both now rest on the same condition -- there is a feasible layout to
@@ -486,7 +484,7 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
         cmd->destroy()->add(&destroy_);
 
         g_resultCmd = cmd;
-        g_tickCount = g_previewCount = g_validateCount = 0;
+        g_tickCount = g_previewCount = 0;
         g_previewApplied = 0;
         g_previewClaimed = false;
         g_previewedGeneration = 0;
