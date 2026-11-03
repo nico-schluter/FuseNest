@@ -28,11 +28,6 @@ const char* kCmdId = "FuseNestCommand";
 // and a command's execute handler is the only thing it groups into one undo
 // step, so the write-back has to happen in here.
 const char* kResultCmdId = "FuseNestResultCommand";
-// Starting a command from inside another command's destroy handler is too
-// early; Fusion is still tearing the first one down. Hopping through a
-// CustomEvent defers the launch until the main thread is back in its event
-// loop and command 1 is really gone.
-const char* kLaunchEventId = "FuseNestLaunchResult";
 const char* kPanelId = "SolidScriptsAddinsPanel";
 
 // Fusion's internal length unit is centimetres, and ValueCommandInput::value()
@@ -55,7 +50,6 @@ const char* kInPreviewClock = "fnPreviewClock";
 
 Ptr<CommandDefinition> g_cmdDef;
 Ptr<CommandDefinition> g_resultDef;
-Ptr<CustomEvent> g_launchEvent;
 
 /// The profiles the last solve was built from. Placement item_ids index into
 /// this, so it has to outlive the command that produced it.
@@ -120,11 +114,6 @@ Ptr<Command> g_resultCmd;
 bool g_launchPending = false;
 bool g_solveFinished = false;
 
-/// Set when the result dialog has been asked for but has not appeared. The
-/// direct launch is the path being tested; this is what notices if it silently
-/// did nothing, so a solve cannot end up running with nothing watching it.
-bool g_awaitingResultDialog = false;
-
 // Diagnostics for the one open question in this design: what actually makes
 // Fusion re-run executePreview on a dialog whose inputs the user is not
 // touching. Counted rather than logged per-event -- at a 150 ms tick a short
@@ -132,9 +121,7 @@ bool g_awaitingResultDialog = false;
 long g_tickCount = 0;
 long g_previewCount = 0;
 long g_validateCount = 0;
-long g_inputChangedCount = 0;
 long g_previewApplied = 0;
-std::string g_lastChangedId;
 
 /// The layout the preview is currently drawing, and where it came from. Held so
 /// the preview and a later Apply use the same one even though the kernel keeps
@@ -170,12 +157,13 @@ std::chrono::steady_clock::time_point g_lastPreviewAt{};
 /// 22 / 18 / 14 / 11 redraws at 0.1 / 0.25 / 0.5 / 1% thresholds.
 constexpr double kMinWidthImprovementPct = 0.5;
 
-/// Diagnostics for the open question: how many executePreview events does one
-/// clock toggle actually produce? Earlier numbers suggested about four, but
-/// doExecutePreview() was still in the picture then.
+/// Redraws asked for, and layouts examined and found not worth drawing.
+///
+/// Kept rather than retired with the rest of the instrumentation: previews
+/// against redraws is the ratio that caught the status readout quietly
+/// repainting the whole design every tick, 349 previews for 5 wanted redraws.
+/// It now sits near 1.5, and a regression would show up here first.
 long g_toggles = 0;
-long g_previewsSinceToggle = 0;
-long g_maxPreviewsPerToggle = 0;
 long g_skippedRedraws = 0;
 
 /// Set once a preview has claimed its result as the final one, so the execute
@@ -401,7 +389,6 @@ class ResultPreviewHandler : public CommandEventHandler {
         // Timeline grouping is skipped: these moves are about to be discarded,
         // and grouping them costs a timeline operation per preview. The preview
         // that OK keeps is regrouped by the execute path.
-        ++g_previewsSinceToggle;
         const WriteBackResult wb =
             applyPlacements(Application::get(), g_lastProfiles, g_shown, /*groupTimeline=*/false);
         if (wb.moved > 0) {
@@ -428,19 +415,6 @@ class ResultValidateHandler : public ValidateInputsEventHandler {
     }
 };
 
-/// Answers a direct question: does writing to a TextBoxCommandInput count as an
-/// input change at all? If this only ever reports the diagnostic checkbox, then
-/// textbox writes are invisible to Fusion's change pipeline, which would explain
-/// the preview never firing on its own.
-class ResultInputChangedHandler : public InputChangedEventHandler {
-  public:
-    void notify(const Ptr<InputChangedEventArgs>& args) override {
-        ++g_inputChangedCount;
-        if (args)
-            if (Ptr<CommandInput> in = args->input()) g_lastChangedId = in->id();
-    }
-};
-
 class ResultDestroyHandler : public CommandEventHandler {
   public:
     void notify(const Ptr<CommandEventArgs>& args) override {
@@ -450,8 +424,7 @@ class ResultDestroyHandler : public CommandEventHandler {
                 std::to_string(g_tickCount) + ", redraws " + std::to_string(g_toggles) + ", " +
                 std::to_string(g_skippedRedraws) + " skipped as invisible, previews " +
                 std::to_string(g_previewCount) + " (" + std::to_string(g_previewApplied) +
-                " applied, up to " + std::to_string(g_maxPreviewsPerToggle) +
-                " per redraw), inputChanged " + std::to_string(g_inputChangedCount));
+                " applied)");
 
         // Unconditional: a dialog that is gone has nobody left to show progress
         // to, so the engine has no reason to keep burning cores. On OK the
@@ -509,18 +482,16 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
 
         cmd->validateInputs()->add(&validate_);
         cmd->executePreview()->add(&preview_);
-        cmd->inputChanged()->add(&inputChanged_);
         cmd->execute()->add(&execute_);
         cmd->destroy()->add(&destroy_);
 
         g_resultCmd = cmd;
-        g_tickCount = g_previewCount = g_validateCount = g_inputChangedCount = 0;
+        g_tickCount = g_previewCount = g_validateCount = 0;
         g_previewApplied = 0;
         g_previewClaimed = false;
-        g_lastChangedId.clear();
         g_previewedGeneration = 0;
         g_lastPreviewAt = {};
-        g_toggles = g_previewsSinceToggle = g_maxPreviewsPerToggle = g_skippedRedraws = 0;
+        g_toggles = g_skippedRedraws = 0;
         g_statusShown.clear();
         g_shown.clear();
         g_shownInfo = NkSnapshotInfo{};
@@ -532,7 +503,6 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
   private:
     ResultValidateHandler validate_;
     ResultPreviewHandler preview_;
-    ResultInputChangedHandler inputChanged_;
     ResultExecuteHandler execute_;
     ResultDestroyHandler destroy_;
 };
@@ -540,24 +510,6 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
 ResultCreatedHandler g_resultCreatedHandler;
 
 /// Opens the result dialog, one event-loop turn after command 1 has gone.
-/// The fallback path, one event-loop turn later than destroy. Kept only until
-/// the direct launch has proven itself.
-class LaunchHandler : public CustomEventHandler {
-  public:
-    void notify(const Ptr<CustomEventArgs>& /*args*/) override {
-        if (!g_resultDef || g_resultCmd) return;
-        if (!g_resultDef->execute()) {
-            std::string err;
-            if (Ptr<Application> app = Application::get()) app->getLastError(&err);
-            logLine("result command failed to start: " + err);
-            // Without a dialog there is nothing to show progress to or accept
-            // from, so the solve is pointless.
-            solverCancel();
-        }
-    }
-};
-
-LaunchHandler g_launchHandler;
 
 // --- engine callbacks ----------------------------------------------------
 
@@ -647,8 +599,6 @@ void maybeAdvancePreview() {
     g_shownInfo = info;
     g_lastPreviewAt = now;
 
-    g_maxPreviewsPerToggle = std::max(g_maxPreviewsPerToggle, g_previewsSinceToggle);
-    g_previewsSinceToggle = 0;
     ++g_toggles;
 
     if (Ptr<CommandInputs> inputs = g_resultCmd->commandInputs())
@@ -663,18 +613,7 @@ void onProgressTick() {
     // open to show it to.
     solverDrainKernelLog();
 
-    if (!g_resultCmd) {
-        // execute() can report success without a dialog ever appearing. Give it
-        // a couple of ticks, then fall back rather than leave a solve running
-        // unwatched and unacceptable.
-        if (g_awaitingResultDialog && g_tickCount > 2) {
-            g_awaitingResultDialog = false;
-            logLine("direct launch reported success but no dialog appeared; using the hop");
-            if (Ptr<Application> app = Application::get()) app->fireCustomEvent(kLaunchEventId);
-        }
-        return;
-    }
-    g_awaitingResultDialog = false;
+    if (!g_resultCmd) return;
 
     // Redraw first, then describe: the status line reports the layout on
     // screen, so writing it before the redraw would caption the previous one.
@@ -685,8 +624,7 @@ void onProgressTick() {
         logLine("tick " + std::to_string(g_tickCount) + ": gen " +
                 std::to_string(g_shownInfo.generation) + ", redraws " +
                 std::to_string(g_toggles) + " (" + std::to_string(g_skippedRedraws) +
-                " skipped as invisible), previews " + std::to_string(g_previewCount) +
-                ", previews per redraw max " + std::to_string(g_maxPreviewsPerToggle));
+                " skipped as invisible), previews " + std::to_string(g_previewCount));
 }
 
 /// Main thread, once, however the solve ended.
@@ -858,25 +796,23 @@ class DestroyHandler : public CommandEventHandler {
     void notify(const Ptr<CommandEventArgs>& /*args*/) override {
         if (!g_launchPending) return;
         g_launchPending = false;
-        g_awaitingResultDialog = true;
 
-        // Straight from destroy, no CustomEvent hop. The hop was reasoning, not
-        // a finding: starting a command while Fusion is still tearing the
-        // previous one down looked like it ought to be too early. If it is,
-        // execute() returns false and the hop below still runs -- and the tick
-        // handler notices the other failure mode, where it returns true and no
-        // dialog appears.
+        // Straight from destroy. Starting a command while Fusion is still
+        // tearing down the previous one looked like it ought to be too early,
+        // and a CustomEvent hop used to defer it a turn -- but the direct call
+        // was then measured launching cleanly seven times out of seven, in both
+        // directions, so the hop is gone. Keeping it would have meant keeping a
+        // registered event and a handler for a path nothing takes.
         if (g_resultDef && g_resultDef->execute()) {
-            logLine("result dialog launched directly from destroy");
+            logLine("result dialog launched");
             return;
         }
 
         std::string err;
-        if (Ptr<Application> app = Application::get()) {
-            app->getLastError(&err);
-            logLine("direct launch refused (" + err + "); deferring via CustomEvent");
-            app->fireCustomEvent(kLaunchEventId);
-        }
+        if (Ptr<Application> app = Application::get()) app->getLastError(&err);
+        logLine("result dialog failed to launch: " + err);
+        // Nothing left to show progress to or accept from.
+        solverCancel();
     }
 };
 
@@ -1083,12 +1019,6 @@ bool registerNestCommand(const Ptr<Application>& app) {
         return false;
     }
 
-    g_launchEvent = app->registerCustomEvent(kLaunchEventId);
-    if (!g_launchEvent || !g_launchEvent->add(&g_launchHandler)) {
-        logLine("could not register the launch event");
-        return false;
-    }
-
     if (!solverInit(app, &onProgressTick, &reportCompletion)) {
         logLine("solverInit failed -- the command will register but cannot run");
         return false;
@@ -1105,12 +1035,6 @@ void unregisterNestCommand(const Ptr<Application>& app) {
 
     Ptr<UserInterface> ui = app ? app->userInterface() : nullptr;
     if (!ui) return;
-
-    if (g_launchEvent) {
-        g_launchEvent->remove(&g_launchHandler);
-        g_launchEvent = nullptr;
-    }
-    if (app) app->unregisterCustomEvent(kLaunchEventId);
 
     if (Ptr<ToolbarPanel> panel = ui->allToolbarPanels()->itemById(kPanelId))
         if (Ptr<ToolbarControl> ctrl = panel->controls()->itemById(kCmdId)) ctrl->deleteMe();
