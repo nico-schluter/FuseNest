@@ -768,6 +768,7 @@ class ExecuteHandler : public CommandEventHandler {
         Ptr<Command> cmd = args ? args->command() : nullptr;
         const NestRequest req = readInputs(cmd ? cmd->commandInputs() : nullptr);
 
+        timingReset();
         logLine("execute:");
         logLine(req.describe());
 
@@ -786,7 +787,14 @@ class ExecuteHandler : public CommandEventHandler {
         logLine(std::string("preview mode: ") + previewModeLabel(g_previewMode));
 
         ExtractOptions opts;
-        const ExtractResult extracted = extractProfiles(app, req.parts, opts);
+        ExtractResult extracted;
+        {
+            // Unmeasured until now, and it is main-thread work on every body in
+            // the job -- so it is both a possible freeze of its own and the
+            // reason the engine may already be idle by the time we ask.
+            ScopedTime _t("setup.extractProfiles");
+            extracted = extractProfiles(app, req.parts, opts);
+        }
 
         int approximated = 0;
         double totalAreaMm2 = 0.0;
@@ -798,7 +806,11 @@ class ExecuteHandler : public CommandEventHandler {
         }
 
         g_lastProfiles = extracted.profiles;
-        const SolverInput input = buildSolverInput(req, extracted.profiles, "fusenest");
+        SolverInput input;
+        {
+            ScopedTime _t("setup.buildSolverInput");
+            input = buildSolverInput(req, extracted.profiles, "fusenest");
+        }
         const std::string instancePath = std::string(outputDir()) + "/fusenest_instance.json";
         {
             std::ofstream f(instancePath);
@@ -843,6 +855,8 @@ class ExecuteHandler : public CommandEventHandler {
         pending.summary = g_jobSummary;
         pending.itemCount = input.itemCount;
 
+        logLine(std::string("engine busy when the job was ready: ") +
+                (solverBusy() ? "yes, queueing" : "no, starting now"));
         if (solverBusy()) {
             // A previous solve is still winding down from a cancel. Queue this
             // one and let the completion handler start it; the dialog opens
@@ -862,6 +876,8 @@ class ExecuteHandler : public CommandEventHandler {
                                "FuseNest");
             return;
         }
+
+        logLine(timingReport());
 
         // The dialog cannot open from here -- this command still owns the UI.
         g_launchPending = true;
