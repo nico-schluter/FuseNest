@@ -4,6 +4,7 @@
 #include "nest_request.h"
 #include "profile.h"
 #include "solver.h"
+#include "timing.h"
 #include "writeback.h"
 #include "solver_input.h"
 
@@ -378,6 +379,7 @@ class ResultExecuteHandler : public CommandEventHandler {
 class ResultPreviewHandler : public CommandEventHandler {
   public:
     void notify(const Ptr<CommandEventArgs>& args) override {
+        ScopedTime _t("preview.total");
         ++g_previewCount;
 
         // Draws the layout the tick captured, NOT a freshly fetched one. Fusion
@@ -427,6 +429,8 @@ class ResultDestroyHandler : public CommandEventHandler {
         // Unconditional: a dialog that is gone has nobody left to show progress
         // to, so the engine has no reason to keep burning cores. On OK the
         // solve is already over and this is a no-op.
+        logLine(timingReport());
+
         solverCancel();
         g_resultCmd = nullptr;
 
@@ -490,6 +494,7 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
         g_previewedGeneration = 0;
         g_lastPreviewAt = {};
         g_toggles = g_skippedRedraws = 0;
+        timingReset();
         g_statusShown.clear();
         g_shown.clear();
         g_shownInfo = NkSnapshotInfo{};
@@ -517,6 +522,7 @@ ResultCreatedHandler g_resultCreatedHandler;
 /// placement's item_id indexes into, and the layout the preview is drawing. A
 /// stale layout paired with fresh profiles would move the wrong bodies.
 bool beginJob(const PendingJob& job, std::string& error) {
+    ScopedTime _t("job.begin");
     g_lastProfiles = job.profiles;
     g_jobSummary = job.summary;
 
@@ -578,7 +584,10 @@ void maybeAdvancePreview() {
 
     NkSnapshotInfo info{};
     std::vector<NkPlacement> fresh;
-    if (!solverSnapshot(fresh, info)) return;
+    {
+        ScopedTime _t("snapshot.copy");
+        if (!solverSnapshot(fresh, info)) return;
+    }
 
     // Examined, so do not examine it again -- but g_shown stays as the last
     // layout actually drawn, which is what the next comparison must be against.
@@ -606,23 +615,34 @@ void maybeAdvancePreview() {
 
 /// Main thread, every ~150 ms while a solve runs.
 void onProgressTick() {
+    ScopedTime _t("tick.total");
     ++g_tickCount;
     // Before the early return: the trace is worth having even with no dialog
     // open to show it to.
-    solverDrainKernelLog();
+    {
+        ScopedTime _t("tick.drainKernelLog");
+        solverDrainKernelLog();
+    }
 
     if (!g_resultCmd) return;
 
     // Redraw first, then describe: the status line reports the layout on
     // screen, so writing it before the redraw would caption the previous one.
-    maybeAdvancePreview();
-    refreshResultDialog();
+    {
+        ScopedTime _a("tick.maybeAdvancePreview");
+        maybeAdvancePreview();
+    }
+    {
+        ScopedTime _r("tick.refreshStatus");
+        refreshResultDialog();
+    }
 
     if (g_tickCount == 1 || g_tickCount % 40 == 0)
         logLine("tick " + std::to_string(g_tickCount) + ": gen " +
                 std::to_string(g_shownInfo.generation) + ", redraws " +
                 std::to_string(g_toggles) + " (" + std::to_string(g_skippedRedraws) +
-                " skipped as invisible), previews " + std::to_string(g_previewCount));
+                " skipped as invisible), previews " + std::to_string(g_previewCount) + "\n" +
+                timingReport());
 }
 
 /// Main thread, once, however the solve ended.

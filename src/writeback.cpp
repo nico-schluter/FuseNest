@@ -1,5 +1,6 @@
 #include "writeback.h"
 #include "log.h"
+#include "timing.h"
 #include "nest_kernel.h"
 
 #include <Fusion/FusionAll.h>
@@ -37,6 +38,7 @@ Ptr<Matrix3D> placementMatrix(const NkPlacement& p) {
 
 WriteBackResult applyPlacements(const Ptr<Application>& app, const std::vector<Profile>& profiles,
                                 const std::vector<NkPlacement>& placements, bool groupTimeline) {
+    ScopedTime _total("writeback.total");
     WriteBackResult result;
 
     Ptr<Design> design = app ? app->activeProduct()->cast<Design>() : nullptr;
@@ -89,18 +91,35 @@ WriteBackResult applyPlacements(const Ptr<Application>& app, const std::vector<P
             continue;
         }
 
-        Ptr<Matrix3D> m = placementMatrix(p);
+        Ptr<Matrix3D> m;
+        {
+            ScopedTime _t("writeback.matrix");
+            m = placementMatrix(p);
+        }
         if (!m) {
             result.warnings.push_back(profile.name + ": could not build transform");
             ++result.skipped;
             continue;
         }
 
-        Ptr<ObjectCollection> entities = ObjectCollection::create();
-        entities->add(body);
+        Ptr<ObjectCollection> entities;
+        {
+            ScopedTime _t("writeback.collection");
+            entities = ObjectCollection::create();
+            entities->add(body);
+        }
 
-        Ptr<MoveFeatureInput> input = moves->createInput2(entities);
-        if (!input || !input->defineAsFreeMove(m)) {
+        Ptr<MoveFeatureInput> input;
+        bool defined = false;
+        {
+            ScopedTime _t("writeback.createInput2");
+            input = moves->createInput2(entities);
+        }
+        if (input) {
+            ScopedTime _t("writeback.defineAsFreeMove");
+            defined = input->defineAsFreeMove(m);
+        }
+        if (!input || !defined) {
             std::string err;
             app->getLastError(&err);
             result.warnings.push_back(profile.name + ": defineAsFreeMove failed (" + err + ")");
@@ -108,7 +127,14 @@ WriteBackResult applyPlacements(const Ptr<Application>& app, const std::vector<P
             continue;
         }
 
-        if (!moves->add(input)) {
+        bool added = false;
+        {
+            // The prime suspect: in a parametric design every move feature is a
+            // timeline entry, and adding one can recompute.
+            ScopedTime _t("writeback.movesAdd");
+            added = moves->add(input);
+        }
+        if (!added) {
             std::string err;
             app->getLastError(&err);
             result.warnings.push_back(profile.name + ": move failed (" + err + ")");
@@ -120,6 +146,8 @@ WriteBackResult applyPlacements(const Ptr<Application>& app, const std::vector<P
 
     // One collapsible timeline entry instead of N. Only meaningful in a
     // parametric design; direct modelling has no timeline at all.
+    {
+    ScopedTime _group("writeback.timelineGroup");
     if (groupTimeline && timeline && result.moved > 1) {
         const int markerAfter = timeline->markerPosition();
         if (markerAfter - 1 > markerBefore) {
@@ -130,6 +158,7 @@ WriteBackResult applyPlacements(const Ptr<Application>& app, const std::vector<P
                 result.warnings.push_back("could not group the move features in the timeline");
             }
         }
+    }
     }
 
     std::ostringstream os;

@@ -63,6 +63,7 @@ add_library(${ADDIN_NAME} SHARED
     src/profile.cpp
     src/solver.cpp
     src/solver_input.cpp
+    src/timing.cpp
     src/writeback.cpp
 )
 
