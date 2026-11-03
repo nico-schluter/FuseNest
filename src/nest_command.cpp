@@ -47,7 +47,6 @@ const char* kInWorkers = "fnWorkers";
 const char* kInVerbose = "fnVerbose";
 const char* kInStatus = "fnStatus";
 const char* kInJob = "fnJob";
-const char* kInPreviewClock = "fnPreviewClock";
 
 Ptr<CommandDefinition> g_cmdDef;
 Ptr<CommandDefinition> g_resultDef;
@@ -242,7 +241,12 @@ std::string statusText() {
         os << "density " << static_cast<int>(g_shownInfo.density * 100.0) << " % &middot; width "
            << static_cast<long>(g_shownInfo.strip_width) << " mm &middot; " << g_shown.size()
            << " parts placed";
-        if (!g_solveFinished) os << "<br/>best so far -- Apply keeps it";
+        // The ordinal is not decoration. Writing this textbox is what triggers
+        // the redraw, so the string has to differ every time -- and the rounded
+        // width and density can easily repeat between two layouts that differ by
+        // the half-percent the gate demands.
+        if (!g_solveFinished)
+            os << "<br/>improvement " << g_toggles << " &middot; best so far, Apply keeps it";
     } else if (!g_solveFinished) {
         os << "looking for a first feasible layout";
     }
@@ -472,15 +476,6 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
         inputs->addTextBoxCommandInput(kInStatus, "", statusText(), 3, true);
         if (!g_jobSummary.empty())
             inputs->addTextBoxCommandInput(kInJob, "", g_jobSummary, 6, true);
-        // The preview clock. Fusion regenerates a preview in response to an input
-        // VALUE changing, and a TextBoxCommandInput's formattedText is not one --
-        // writing it fires no inputChanged at all. So the status readout cannot
-        // drive the preview and something else has to. This input exists purely
-        // to be toggled once per progress tick; it is hidden because it carries
-        // no meaning to the user.
-        if (Ptr<BoolValueCommandInput> clock =
-                inputs->addBoolValueInput(kInPreviewClock, "preview clock", true, "", false))
-            clock->isVisible(false);
 
         cmd->validateInputs()->add(&validate_);
         cmd->executePreview()->add(&preview_);
@@ -499,6 +494,7 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
         g_shown.clear();
         g_shownInfo = NkSnapshotInfo{};
         // A solve may already have published layouts before this dialog opened.
+        // Only updates state here; the first tick's status write draws it.
         maybeAdvancePreview();
         logLine("result dialog open");
     }
@@ -607,10 +603,12 @@ void maybeAdvancePreview() {
     g_lastPreviewAt = now;
 
     ++g_toggles;
-
-    if (Ptr<CommandInputs> inputs = g_resultCmd->commandInputs())
-        if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInPreviewClock))
-            b->value(!b->value());
+    // No separate trigger. Writing an input is what makes Fusion regenerate the
+    // preview, and the status refresh that follows in the same tick is already
+    // a write -- so one write does both jobs. Toggling a clock as well cost a
+    // second preview round, measured at 1832ms against the status refresh's
+    // 3679ms on a hundred bodies: two thirds of the freeze was the readout and
+    // the remaining third was a widget whose only job was to change.
 }
 
 /// Main thread, every ~150 ms while a solve runs.
