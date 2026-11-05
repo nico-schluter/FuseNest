@@ -10,19 +10,14 @@
 // and eventually container keep-out zones.
 #pragma once
 
+#include "point2.h"
+
 #include <Core/CoreAll.h>
 
 #include <string>
 #include <vector>
 
 namespace fusenest {
-
-/// A point on the projection plane, in MILLIMETRES. Fusion works in
-/// centimetres; the conversion happens once, inside extractProfiles.
-struct Point2 {
-    double x = 0.0;
-    double y = 0.0;
-};
 
 /// One nestable outline. `outer` is closed implicitly -- the first point is not
 /// repeated at the end, which is what jagua-rs expects (it strips a repeated
