@@ -65,6 +65,7 @@ add_library(${ADDIN_NAME} SHARED
     src/solver.cpp
     src/solver_input.cpp
     src/timing.cpp
+    src/triangulate.cpp
     src/writeback.cpp
 )
 
@@ -192,3 +193,26 @@ add_custom_command(
 add_custom_target(rust_kernel DEPENDS "${RUST_KERNEL_LIB}")
 add_dependencies(${ADDIN_NAME} rust_kernel)
 target_link_libraries(${ADDIN_NAME} PRIVATE "${RUST_KERNEL_LIB}")
+
+# ---------------------------------------------------------------------------
+# Tests.
+#
+# Only the geometry that does not touch Fusion. That is the point of the
+# target: everything else in the add-in can be exercised only by restarting
+# Fusion and looking at it, so the code that CAN be checked from a terminal is
+# kept free of Fusion headers and checked here.
+#
+#   cmake --build --preset dev --target run-tests
+# ---------------------------------------------------------------------------
+add_executable(triangulate_test EXCLUDE_FROM_ALL
+    tests/triangulate_test.cpp
+    src/triangulate.cpp
+)
+target_include_directories(triangulate_test PRIVATE src)
+target_compile_features(triangulate_test PRIVATE cxx_std_17)
+
+add_custom_target(run-tests
+    COMMAND triangulate_test
+    DEPENDS triangulate_test
+    COMMENT "Running geometry tests"
+)
