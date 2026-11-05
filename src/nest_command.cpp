@@ -11,7 +11,6 @@
 
 #include <Fusion/FusionAll.h>
 
-#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <sstream>
@@ -46,8 +45,6 @@ const char* kInRotation = "fnRotation";
 const char* kInBudget = "fnBudget";
 const char* kInWorkers = "fnWorkers";
 const char* kInVerbose = "fnVerbose";
-const char* kInPreviewMode = "fnPreviewMode";
-const char* kInBenchmark = "fnBenchmark";
 const char* kInStatus = "fnStatus";
 const char* kInJob = "fnJob";
 
@@ -128,13 +125,6 @@ Ptr<Command> g_resultCmd;
 bool g_launchPending = false;
 bool g_solveFinished = false;
 
-/// How the live layout is drawn. Move features are exact and make Apply free,
-/// but cost one timeline insert per body; the graphics modes cost a matrix
-/// assignment per body and need an explicit write-back on Apply.
-PreviewMode g_previewMode = PreviewMode::TempBodies;
-bool g_benchmarkRequested = false;
-bool g_benchmarkDone = false;
-
 // Diagnostics for the one open question in this design: what actually makes
 // Fusion re-run executePreview on a dialog whose inputs the user is not
 // touching. Counted rather than logged per-event -- at a 150 ms tick a short
@@ -142,36 +132,6 @@ bool g_benchmarkDone = false;
 long g_tickCount = 0;
 long g_previewCount = 0;
 long g_previewApplied = 0;
-
-/// How many bodies each preview actually had to hide, across the dialog's life.
-///
-/// The spread is what answers the question, not any single sample: all of them
-/// every time means Fusion's rollback restores visibility before each
-/// regeneration and the work is real, none after the first means it persists and
-/// the hiding belongs outside the preview. A mixture means something else is
-/// toggling visibility and the assumption is wrong in a third way.
-int g_hiddenFirst = -1;
-int g_hiddenLast = -1;
-int g_hiddenMin = -1;
-int g_hiddenMax = -1;
-
-void noteHidden(int changed) {
-    g_hiddenLast = changed;
-    if (g_hiddenFirst < 0) {
-        g_hiddenFirst = g_hiddenMin = g_hiddenMax = changed;
-        return;
-    }
-    g_hiddenMin = std::min(g_hiddenMin, changed);
-    g_hiddenMax = std::max(g_hiddenMax, changed);
-}
-
-std::string hiddenReport(std::size_t profileCount) {
-    if (g_hiddenFirst < 0) return "hidden: never asked";
-    std::ostringstream os;
-    os << "hidden per preview of " << profileCount << " bodies: first " << g_hiddenFirst
-       << ", last " << g_hiddenLast << ", min " << g_hiddenMin << ", max " << g_hiddenMax;
-    return os.str();
-}
 
 /// The layout the preview is currently drawing, and where it came from. Held so
 /// the preview and a later Apply use the same one even though the kernel keeps
@@ -215,10 +175,6 @@ constexpr double kMinWidthImprovementPct = 0.5;
 /// It now sits near 1.5, and a regression would show up here first.
 long g_toggles = 0;
 long g_skippedRedraws = 0;
-
-/// Set once a preview has claimed its result as the final one, so the execute
-/// handler knows not to apply the same placements a second time.
-bool g_previewClaimed = false;
 
 /// Defined below, next to the rest of the preview plumbing; declared here
 /// because the dialog's created handler needs it to catch up on a solve that
@@ -407,16 +363,9 @@ class ResultExecuteHandler : public CommandEventHandler {
         Ptr<Application> app = Application::get();
         Ptr<UserInterface> ui = app ? app->userInterface() : nullptr;
 
-        if (g_previewClaimed) {
-            // Fusion reused the preview's transforms, so there is nothing left
-            // to do. If this line never appears, isValidResult did not take and
-            // the write-back has to stay in execute.
-            logLine("execute: preview already claimed the result, nothing to apply");
-            return;
-        }
-
-        // The graphics modes leave the sources hidden and the preview unclaimed,
-        // so OK lands here and has to put them back before moving them.
+        // The preview leaves the sources hidden and never claims the result --
+        // custom graphics are not a model change, so there is nothing for
+        // Fusion to keep and OK always lands here. Unhide before moving.
         previewHideSources(g_lastProfiles, false);
 
         const WriteBackResult wb = applyPlacements(app, g_lastProfiles, g_shown);
@@ -446,29 +395,27 @@ class ResultPreviewHandler : public CommandEventHandler {
         // time; fetching here instead would mean the drawing changed under a
         // user who had not asked for anything.
         //
-        // Timeline grouping is skipped: these moves are about to be discarded,
-        // and grouping them costs a timeline operation per preview. The preview
-        // that OK keeps is regrouped by the execute path.
-        if (g_previewMode != PreviewMode::MoveFeatures) {
-            // Re-hidden every time: visibility is a model change, so Fusion's
-            // rollback makes the bodies visible again before each regeneration.
-            noteHidden(previewHideSources(g_lastProfiles, true));
-            if (previewShow(g_shown) > 0) ++g_previewApplied;
-            // Custom graphics are not a model change, so there is nothing for
-            // Fusion to keep. The execute handler does the real write-back.
-            if (args) args->isValidResult(false);
-            return;
-        }
+        // Re-hidden every pass: visibility is a document change, so Fusion's
+        // rollback makes the bodies visible again before each regeneration.
+        previewHideSources(g_lastProfiles, true);
 
-        const WriteBackResult wb =
-            applyPlacements(Application::get(), g_lastProfiles, g_shown, /*groupTimeline=*/false);
-        if (wb.moved > 0) {
-            ++g_previewApplied;
-            g_previewClaimed = true;
+        // Built here and not in commandCreated, because this is where a
+        // transaction exists to own it -- see the transaction rule in
+        // preview.h. Fusion rolls the group back with the pass that made it,
+        // so this rebuilds every redraw; the condition asks the document
+        // rather than trusting a pointer the rollback may have invalidated.
+        if (!previewHasGeometry(Application::get())) {
+            std::string error;
+            if (!previewBuild(Application::get(), g_lastProfiles, error)) {
+                logLine("preview build failed: " + error);
+                return;
+            }
         }
-        // isValidResult tells Fusion the preview is reusable: OK keeps these
-        // transforms instead of rolling back and firing execute.
-        if (args) args->isValidResult(wb.moved > 0);
+        if (previewShow(g_shown) > 0) ++g_previewApplied;
+
+        // Custom graphics are not a model change, so there is nothing here for
+        // Fusion to keep. The execute handler does the real write-back.
+        if (args) args->isValidResult(false);
     }
 };
 
@@ -499,7 +446,6 @@ class ResultDestroyHandler : public CommandEventHandler {
         // Unconditional: a dialog that is gone has nobody left to show progress
         // to, so the engine has no reason to keep burning cores. On OK the
         // solve is already over and this is a no-op.
-        logLine(hiddenReport(g_lastProfiles.size()));
         logLine(timingReport());
 
         // No unhide here any more. Hiding happens inside executePreview now, so
@@ -559,13 +505,22 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
         cmd->execute()->add(&execute_);
         cmd->destroy()->add(&destroy_);
 
-        if (g_previewMode != PreviewMode::MoveFeatures) {
-            std::string error;
-            if (!previewBuild(Application::get(), g_lastProfiles, g_previewMode, error)) {
-                logLine("preview build failed (" + error + "); falling back to move features");
-                g_previewMode = PreviewMode::MoveFeatures;
-            }
-            // NOTHING is hidden here, deliberately. Hiding in commandCreated
+        {
+            // NOTHING is built or hidden here, deliberately.
+            //
+            // A custom graphics group hangs off the Component, so creating one
+            // is a document write -- and commandCreated owns no transaction,
+            // so that write became an undo entry of its own. The symptom was
+            // two undo steps after Apply: the first restored the bodies AND
+            // the graphics (deleted from destroy, which does fall inside the
+            // command transaction), the second finally removed the group that
+            // commandCreated had made. Building in the preview handler puts
+            // creation and deletion on the same side of the same transaction,
+            // which is one undo step.
+            //
+            // The hiding below moved for the same reason, one iteration
+            // earlier. Hiding in commandCreated worked and saved 85% of the
+            // preview cost -- 100 bodies once
             // worked and saved 85% of the preview cost -- 100 bodies once
             // instead of 100 twenty times, confirmed by the hide counter going
             // to first 0 / last 0. But it is a document write outside any
@@ -573,21 +528,19 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
             // crashes appeared in the same three iterations that introduced it
             // here and the matching restore in destroy.
             //
-            // So every document change is back inside executePreview or
-            // execute, where Fusion owns a transaction. Hiding moves to the
-            // preview handler, which costs ~20ms of a ~25ms preview and was
-            // measured as comfortable: tick.total averaged 10ms across a
-            // hundred bodies. Correctness over the saving.
+            // So every document change is inside executePreview or execute,
+            // where Fusion owns a transaction -- the graphics build included.
+            // Hiding costs ~20ms of a ~25ms preview and was measured as
+            // comfortable: tick.total averaged 10ms across a hundred bodies.
+            // Correctness over the saving.
         }
 
         g_resultCmd = cmd;
         g_tickCount = g_previewCount = 0;
         g_previewApplied = 0;
-        g_previewClaimed = false;
         g_previewedGeneration = 0;
         g_lastPreviewAt = {};
         g_toggles = g_skippedRedraws = 0;
-        g_hiddenFirst = g_hiddenLast = g_hiddenMin = g_hiddenMax = -1;
         timingReset();
         g_statusShown.clear();
         g_shown.clear();
@@ -701,18 +654,6 @@ void maybeAdvancePreview() {
     g_shownInfo = info;
     g_lastPreviewAt = now;
 
-    if (g_benchmarkRequested && !g_benchmarkDone) {
-        g_benchmarkDone = true;
-        previewBenchmark(Application::get(), g_lastProfiles, g_shown);
-        // Rebuilt because the benchmark tore down its own geometry, which is
-        // the same geometry the live preview was using.
-        if (g_previewMode != PreviewMode::MoveFeatures) {
-            std::string error;
-            if (!previewBuild(Application::get(), g_lastProfiles, g_previewMode, error))
-                logLine("preview rebuild after benchmark failed: " + error);
-        }
-    }
-
     ++g_toggles;
     // No separate trigger. Writing an input is what makes Fusion regenerate the
     // preview, and the status refresh that follows in the same tick is already
@@ -750,8 +691,8 @@ void onProgressTick() {
         logLine("tick " + std::to_string(g_tickCount) + ": gen " +
                 std::to_string(g_shownInfo.generation) + ", redraws " +
                 std::to_string(g_toggles) + " (" + std::to_string(g_skippedRedraws) +
-                " skipped as invisible), previews " + std::to_string(g_previewCount) +
-                "\n" + hiddenReport(g_lastProfiles.size()) + "\n" + timingReport());
+                " skipped as invisible), previews " + std::to_string(g_previewCount) + "\n" +
+                timingReport());
 }
 
 /// Main thread, once, however the solve ended.
@@ -835,18 +776,6 @@ class ExecuteHandler : public CommandEventHandler {
         logLine(req.describe());
 
         rememberSetup(cmd ? cmd->commandInputs() : nullptr, req);
-
-        if (Ptr<CommandInputs> in = cmd ? cmd->commandInputs() : nullptr) {
-            if (Ptr<DropDownCommandInput> d = in->itemById(kInPreviewMode))
-                if (Ptr<ListItem> item = d->selectedItem())
-                    g_previewMode = item->index() == 0   ? PreviewMode::TempBodies
-                                    : item->index() == 1 ? PreviewMode::Outlines
-                                                         : PreviewMode::MoveFeatures;
-            if (Ptr<BoolValueCommandInput> b = in->itemById(kInBenchmark))
-                g_benchmarkRequested = b->value();
-        }
-        g_benchmarkDone = false;
-        logLine(std::string("preview mode: ") + previewModeLabel(g_previewMode));
 
         ExtractOptions opts;
         ExtractResult extracted;
@@ -1103,15 +1032,6 @@ class CreatedHandler : public CommandCreatedEventHandler {
         // default for a latency-sensitive interactive run.
         inputs->addIntegerSpinnerCommandInput(kInWorkers, "Workers", 1, 64, 1, 4);
         inputs->addBoolValueInput(kInVerbose, "Verbose log", true, "", false);
-
-        Ptr<DropDownCommandInput> mode = inputs->addDropDownCommandInput(
-            kInPreviewMode, "Preview using", DropDownStyles::TextListDropDownStyle);
-        if (Ptr<ListItems> items = mode ? mode->listItems() : nullptr) {
-            items->add(previewModeLabel(PreviewMode::TempBodies), true);
-            items->add(previewModeLabel(PreviewMode::Outlines), false);
-            items->add(previewModeLabel(PreviewMode::MoveFeatures), false);
-        }
-        inputs->addBoolValueInput(kInBenchmark, "Benchmark preview modes", true, "", false);
 
         restoreSetupValues(inputs);
 

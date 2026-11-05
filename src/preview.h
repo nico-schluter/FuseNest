@@ -1,18 +1,41 @@
 // Showing a proposed layout without waiting for the model to catch up.
 //
-// Profiling settled why this module exists. Moving bodies with move features
-// costs 8ms PER BODY, essentially all of it inside MoveFeatures::add -- the
-// timeline insert. Every other step of the write-back is free. At a hundred
-// bodies that is ~800ms of frozen main thread per redraw, and it is
+// The preview is custom graphics: a filled triangle mesh per part with its
+// outline drawn on top, positioned by assigning one transform per part per
+// redraw. Geometry is built once per pass and triangulation is cached across
+// passes, so a redraw costs a matrix multiply and not a model edit.
+//
+// WHY NOT THE MODEL ITSELF. Moving a body with a move feature costs ~8ms,
+// essentially all of it the timeline insert inside MoveFeatures::add. It is
 // irreducible: BRepBody has no settable transform, so a move feature is the
 // only way to move a body in a parametric design, and defineAsFreeMove takes
-// one matrix per collection so a hundred different transforms cannot share one
-// feature.
+// one matrix per collection, so a hundred different transforms cannot share
+// one feature. Measured at 12ms each, 104 parts froze the main thread for
+// 17.4 seconds in a single solve. Base features fare no better: Fusion rolls
+// a preview back before regenerating, so the feature is discarded and has to
+// be rebuilt every redraw, which puts a model edit back on the hot path.
 //
-// Custom graphics sidestep the model entirely. Geometry is built once and each
-// redraw only assigns transforms, which is the whole point: the per-redraw cost
-// stops scaling with the modelling engine and starts scaling with a matrix
-// multiply.
+// WHY NOT SOLID GEOMETRY IN THE GRAPHICS. Drawing TemporaryBRepManager copies
+// via addBRepBody crashed Fusion. Four of five dumps shared one stack: undo
+// replaying its transaction stream, rebuilding an ASM::safe_entity_ptr, and
+// faulting in share_entity_status(ENTITY*) on a dead pointer. addBRepBody
+// copies its input, so the group held copied ASM bodies, and the undo stream
+// was left referencing entities destroyed behind its back. Meshes and line
+// strips are plain doubles and ints -- no ASM entity can reach the data model
+// at all -- which is why this approach is the answer to that crash and not
+// merely a cheaper option. It costs nothing to prefer: 3.19ms per redraw
+// against the solid copies' 3.21ms, because the cost is the transform
+// assignment and not the geometry behind it.
+//
+// THE TRANSACTION RULE, which is general and was learned twice. A custom
+// graphics group hangs off the Component, so creating or deleting one is a
+// document write -- as are body visibility changes and anything touching a
+// base feature. Every document write must happen inside executePreview or
+// execute, where Fusion owns a transaction. Writes from commandCreated or
+// destroy own no transaction: they land in the undo stream as entries of
+// their own, which showed up first as intermittent crashes when hiding was
+// done there, and later as a spare undo step after Apply when the graphics
+// group was still being built there.
 #pragma once
 
 #include "nest_kernel.h"
@@ -25,54 +48,36 @@
 
 namespace fusenest {
 
-enum class PreviewMode {
-    /// The model itself. Exact, and Fusion's rollback plus isValidResult make
-    /// Apply free -- but one timeline insert per body, measured at 12ms each,
-    /// so 104 parts froze the main thread for 17.4 seconds across one solve.
-    /// Kept as a reference and an escape hatch, not as a default.
-    MoveFeatures,
-    /// TemporaryBRepManager copies of the real bodies, drawn as custom
-    /// graphics. The default, and measured at 3.21ms per redraw for 104 parts
-    /// against 1241ms for move features -- about 390x. Indistinguishable from
-    /// Outlines per redraw, because the cost is the transform assignment rather
-    /// than the geometry behind it, so there is no reason to draw anything less
-    /// faithful than a copy of the real body.
-    TempBodies,
-    /// The extracted silhouettes drawn as closed line strips. 4ms to build
-    /// against 24ms, which buys nothing worth having, but it shows what the
-    /// solver actually reasoned about rather than what the body looks like --
-    /// which is the better view when a silhouette looks wrong.
-    Outlines,
-};
-
-const char* previewModeLabel(PreviewMode mode);
-
-/// Builds the geometry a graphics mode needs. Once per job. No-op for
-/// MoveFeatures, which has nothing to build.
+/// Builds the geometry for one preview pass.
+///
+/// Must be called from inside executePreview -- see the transaction rule
+/// above. Fusion rolls the group back with the pass that created it, so this
+/// runs once per redraw; triangulation is cached internally and is NOT redone
+/// unless the profiles themselves change.
 bool previewBuild(const adsk::core::Ptr<adsk::core::Application>& app,
-                  const std::vector<Profile>& profiles, PreviewMode mode, std::string& error);
+                  const std::vector<Profile>& profiles, std::string& error);
 
-/// Positions the built geometry. For graphics modes this is one transform
-/// assignment per part. Returns how many parts were placed.
+/// Whether geometry is currently live in the document.
+///
+/// Read from the component rather than from our own pointer: when Fusion rolls
+/// a pass back it takes the group with it, and CustomGraphicsGroup has no
+/// isValid with which to test the dangling Ptr that leaves behind.
+bool previewHasGeometry(const adsk::core::Ptr<adsk::core::Application>& app);
+
+/// Positions the built geometry: one transform assignment per part. Returns
+/// how many parts were placed.
 int previewShow(const std::vector<NkPlacement>& placements);
 
-/// Hides the real bodies so the graphics are not drawn over unmoved originals.
+/// Hides the real bodies so the graphics are not drawn over unmoved originals,
+/// and puts them back on the way out.
 ///
-/// Safe to leave hidden on cancel: visibility is a document change, so it goes
-/// back with the preview transaction if the result is not accepted.
-///
-/// Returns how many bodies actually had to change, which is how we find out
-/// whether re-hiding on every preview is necessary work or a no-op.
+/// Re-done every pass, because visibility is a document change and Fusion's
+/// rollback makes the bodies visible again before each regeneration. Returns
+/// how many bodies actually changed.
 int previewHideSources(const std::vector<Profile>& profiles, bool hidden);
 
-/// Drops the graphics. Must run before the dialog closes -- custom graphics are
-/// NOT part of the command transaction and would survive a cancel.
+/// Drops the graphics. A document write, so it may only be called from inside
+/// executePreview or execute.
 void previewClear();
-
-/// Times all three mechanisms on one layout and writes the result to the log.
-/// Builds and tears down its own geometry, so it leaves nothing behind.
-void previewBenchmark(const adsk::core::Ptr<adsk::core::Application>& app,
-                      const std::vector<Profile>& profiles,
-                      const std::vector<NkPlacement>& placements);
 
 }  // namespace fusenest
