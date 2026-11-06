@@ -23,14 +23,14 @@ use std::cmp::Reverse;
 pub fn exploration_phase(sep: &mut Separator, sol_listener: &mut impl SolutionListener, term: &impl Terminator, config: &ExplorationConfig) -> Vec<SPSolution> {
     let start = Instant::now();
     let initial_eval_count = sep.total_evals;
-    let width_lower_bound = super::strip_width_lower_bound(&sep.prob);
-    let mut current_width = sep.prob.strip_width();
+    let width_lower_bound = super::strip_width_lower_bound(&sep.prob, &sep.locked);
+    let mut current_width = sep.objective_width();
     let mut best_width = current_width;
 
     let mut feasible_sols = vec![sep.prob.save()];
 
     sol_listener.report(ReportType::ExplFeas, &feasible_sols[0]);
-    info!("[EXPL] starting optimization with initial width: {:.3} ({:.3}%)",current_width,sep.prob.density() * 100.0);
+    info!("[EXPL] starting optimization with initial width: {:.3} ({:.3}%)",current_width,sep.objective_density() * 100.0);
 
     let mut infeas_sol_pool: Vec<(SPSolution, f32)> = vec![];
 
@@ -40,12 +40,30 @@ pub fn exploration_phase(sep: &mut Separator, sol_listener: &mut impl SolutionLi
         let total_loss = local_best.1.get_total_loss();
 
         if total_loss == 0.0 {
+            let mut feasible = local_best.0.clone();
+            // FuseNest fork: a sheet nest starts from a strip wide enough for every
+            // allocated sheet, so the first feasible layout can leave whole sheets
+            // empty at the right. Collapse that span in one step -- otherwise the
+            // multiplicative shrink below needs dozens of rounds, each paying for a
+            // full separation, just to reach the content it could have snapped to.
+            // The extent is movables-only, so the locked separators out in the empty
+            // span do not hold the objective open.
+            if !sep.locked.is_empty() {
+                let snapped = current_width.min(sep.solution_width(&feasible));
+                // Cannot fail: with items locked, `change_strip_width` leaves the
+                // physical strip alone, and it is only the resize that can fail.
+                if snapped < current_width && sep.change_strip_width(snapped, None).is_ok() {
+                    debug!("[EXPL] snapping strip to movable content extent: {:.3} -> {:.3}", current_width, snapped);
+                    current_width = snapped;
+                    feasible = sep.prob.save();
+                }
+            }
             // If successfully separated
             if current_width < best_width {
-                info!("[EXPL] feasible solution found! (width: {:.3}, dens: {:.3}%)",current_width,sep.prob.density() * 100.0);
+                info!("[EXPL] feasible solution found! (width: {:.3}, dens: {:.3}%)",current_width,sep.objective_density() * 100.0);
                 best_width = current_width;
-                feasible_sols.push(local_best.0.clone());
-                sol_listener.report(ReportType::ExplFeas, &local_best.0);
+                feasible_sols.push(feasible.clone());
+                sol_listener.report(ReportType::ExplFeas, &feasible);
             }
             // Shrink the strip width and clear the infeasible solution pool
             let next_width = current_width * (1.0 - config.shrink_step);
@@ -60,7 +78,7 @@ pub fn exploration_phase(sep: &mut Separator, sol_listener: &mut impl SolutionLi
             current_width = next_width;
             infeas_sol_pool.clear();
         } else {
-            info!("[EXPL] unable to reach feasibility (width: {:.3}, dens: {:.3}%, min loss: {})", current_width, sep.prob.density() * 100.0, FMT().fmt2(total_loss));
+            info!("[EXPL] unable to reach feasibility (width: {:.3}, dens: {:.3}%, min loss: {})", current_width, sep.objective_density() * 100.0, FMT().fmt2(total_loss));
             sol_listener.report(ReportType::ExplInfeas, &local_best.0);
 
             // Separation was not successful add it to the pool of infeasible solutions
@@ -100,8 +118,15 @@ pub fn exploration_phase(sep: &mut Separator, sol_listener: &mut impl SolutionLi
 }
 
 fn disrupt_solution(sep: &mut Separator, config: &ExplorationConfig) {
-    if sep.prob.layout().placed_items().len() < 2 {
-        warn!("[DSRP] cannot disrupt solution with less than 2 items");
+    // FuseNest fork: locked items are never disrupted. Disruption swaps two large
+    // items, so it is the MOVABLE count that has to be at least two, and every
+    // selection below excludes locked items.
+    let locked = sep.locked.clone();
+    let n_movable = sep.prob.layout().placed_items().iter()
+        .filter(|(_, pi)| !locked.contains(&pi.item().idx()))
+        .count();
+    if n_movable < 2 {
+        warn!("[DSRP] cannot disrupt solution with less than 2 movable items");
         return;
     }
 
@@ -112,22 +137,31 @@ fn disrupt_solution(sep: &mut Separator, config: &ExplorationConfig) {
     // Step 1: Define what constitutes a 'large' item.
 
     // Calculate the total convex hull area of all items, considering quantities.
+    //
+    // FuseNest fork: MOVABLE items only. Summing over every item would include the
+    // locked separators, which on a sheet nest are among the largest things in the
+    // layout; the cutoff derived from them can then exceed every movable's area,
+    // leaving `large_items` (which excludes locked) empty and the choice below with
+    // nothing to pick. Locked items are never disrupted, so they have no business
+    // defining the cutoff for the ones that are.
     let total_convex_hull_area: f32 = sep
         .prob
         .instance()
         .items
         .iter()
+        .filter(|(item, _)| !locked.contains(&item.idx()))
         .map(|(item, quantity)| item.shape_cd().surrogate().convex_hull_area * (*quantity as f32))
         .sum();
 
     let cutoff_threshold_area = total_convex_hull_area * config.large_item_ch_area_cutoff_percentile;
 
-    // Sort items by convex hull area in descending order.
+    // Sort items by convex hull area in descending order (movables only -- see above).
     let sorted_items_by_ch_area = sep
         .prob
         .instance()
         .items
         .iter()
+        .filter(|(item, _)| !locked.contains(&item.idx()))
         .sorted_by_key(|(item, _)| Reverse(OrderedFloat(item.shape_cd().surrogate().convex_hull_area)))
         .peekable();
 
@@ -150,10 +184,21 @@ fn disrupt_solution(sep: &mut Separator, config: &ExplorationConfig) {
     // Step 2: Select two 'large' items and 'swap' them.
 
     let large_items = sep.prob.layout().placed_items().iter()
-        .filter(|(_, pi)| pi.shape().surrogate().convex_hull_area >= ch_area_cutoff);
+        .filter(|(_, pi)| pi.shape().surrogate().convex_hull_area >= ch_area_cutoff && !locked.contains(&pi.item().idx()));
 
-    //Choose a first item with a large enough convex hull
-    let (pk1, pi1) = large_items.clone().choose(&mut sep.rng).expect("[DSRP] failed to choose first item");
+    //Choose a first item with a large enough convex hull. FuseNest fork: fall back to
+    //any movable rather than panicking -- even with a movables-only cutoff, a single
+    //dominant movable can leave `large_items` empty, and a stuck run must not abort.
+    let Some((pk1, pi1)) = large_items.clone().choose(&mut sep.rng)
+        .or_else(|| {
+            sep.prob.layout().placed_items().iter()
+                .filter(|(_, pi)| !locked.contains(&pi.item().idx()))
+                .choose(&mut sep.rng)
+        })
+    else {
+        warn!("[DSRP] no movable item available to disrupt");
+        return;
+    };
 
     //Choose a second item with a large enough convex hull and different enough from the first.
     //If no such item is found, choose a random one.
@@ -166,9 +211,10 @@ fn disrupt_solution(sep: &mut Separator, config: &ExplorationConfig) {
         .choose(&mut sep.rng)
         .or_else(|| {
             sep.prob.layout().placed_items().iter()
-                .filter(|(pk, _)| *pk != pk1) // Ensure the second item is not the same as the first
+                // Ensure the second item is a different, movable one
+                .filter(|(pk, pi)| *pk != pk1 && !locked.contains(&pi.item().idx()))
                 .choose(&mut sep.rng)
-        }) // As a fallback, choose any item
+        }) // As a fallback, choose any movable item
         .expect("[EXPL] failed to choose second item for disruption");
 
     // Step 3: Swap the two items' positions in the layout.
@@ -195,7 +241,13 @@ fn disrupt_solution(sep: &mut Separator, config: &ExplorationConfig) {
         let converting_transformation = dt1_new.compose().inverse()
             .transform(&dt1_old.compose());
 
-        for c1_pk in practically_contained_items(sep.prob.layout(), pk1).into_iter().filter(|c1_pk| *c1_pk != pk2) {
+        // Collected up front: the drag-along moves items, so the layout cannot stay
+        // borrowed across the loop.
+        let contained = practically_contained_items(sep.prob.layout(), pk1).into_iter()
+            .filter(|c1_pk| *c1_pk != pk2)
+            .filter(|c1_pk| !locked.contains(&sep.prob.layout().placed_items()[*c1_pk].item().idx()))
+            .collect_vec();
+        for c1_pk in contained {
             let c1_pi = &sep.prob.layout().placed_items()[c1_pk];
 
             let new_dt = c1_pi.d_transf()
@@ -214,7 +266,13 @@ fn disrupt_solution(sep: &mut Separator, config: &ExplorationConfig) {
         let converting_transformation = dt2_new.compose().inverse()
             .transform(&dt2_old.compose());
 
-        for c2_pk in practically_contained_items(sep.prob.layout(), pk2).into_iter().filter(|c2_pk| *c2_pk != pk1) {
+        // Collected up front: the drag-along moves items, so the layout cannot stay
+        // borrowed across the loop.
+        let contained = practically_contained_items(sep.prob.layout(), pk2).into_iter()
+            .filter(|c2_pk| *c2_pk != pk1)
+            .filter(|c2_pk| !locked.contains(&sep.prob.layout().placed_items()[*c2_pk].item().idx()))
+            .collect_vec();
+        for c2_pk in contained {
             let c2_pi = &sep.prob.layout().placed_items()[c2_pk];
             let new_dt = c2_pi.d_transf()
                 .compose()

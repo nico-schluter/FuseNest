@@ -113,7 +113,9 @@ pub fn run() -> Result<()>{
         &mut ctrlc_terminator,
         &config.expl_cfg,
         &config.cmpr_cfg,
-        initial_solution.as_ref()
+        initial_solution.as_ref(),
+        // Nothing is locked from the CLI, so this is upstream behaviour exactly.
+        std::sync::Arc::new(std::collections::HashSet::new()),
     )?;
 
     let json_path = format!("{OUTPUT_DIR}/final_{}.json", ext_instance.name);

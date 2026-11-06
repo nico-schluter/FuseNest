@@ -8,6 +8,8 @@ use jagua_rs::collision_detection::hazards::filter::NoFilter;
 use jagua_rs::entities::{Layout, PItemKey};
 use ordered_float::Float;
 use slotmap::SecondaryMap;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Tracker of both collisions between pair of items and collisions with the container.
 /// It also stores the weights for every pair of hazards and is used as a cache for collisions.
@@ -17,6 +19,18 @@ pub struct CollisionTracker {
     pub pk_idx_map: SecondaryMap<PItemKey, usize>,
     pub pair_collisions: PairMatrix,
     pub container_collisions: Vec<CTEntry>,
+    /// FuseNest fork: locked item indices (see `Separator::locked`). Empty unless
+    /// the tracker was built by [`CollisionTracker::new_movable_width`].
+    locked: Arc<HashSet<usize>>,
+    /// FuseNest fork: locked-ness per tracker slot. `pk_idx_map` is the only link
+    /// from a key to a slot, and an item's index is not recoverable from a slot
+    /// without the layout, so the flags are cached here when the tracker is built.
+    /// A move keeps the same item in the same slot, so they stay valid.
+    locked_indices: Vec<bool>,
+    /// FuseNest fork: `Some` puts the tracker in MOVABLE-WIDTH mode -- quantify
+    /// against this right edge instead of the container's, and hold locked items
+    /// loss-exempt. `None` is upstream behaviour.
+    virtual_width: Option<f32>,
 }
 
 pub type CTSnapshot = CollisionTracker;
@@ -33,6 +47,9 @@ impl CollisionTracker {
                 .collect(),
             pair_collisions: PairMatrix::new(size),
             container_collisions: vec![CTEntry { weight: 1.0, loss: 0.0 }; size],
+            locked: Arc::new(HashSet::new()),
+            locked_indices: vec![false; size],
+            virtual_width: None,
         };
 
         // Recompute the loss for all items
@@ -43,6 +60,66 @@ impl CollisionTracker {
         debug_assert!(tracker_matches_layout(&ot, l));
 
         ot
+    }
+
+    /// FuseNest fork: a tracker that quantifies against `virtual_width` rather than
+    /// the container's right edge, and treats `locked` items as immovable scenery.
+    ///
+    /// Three consequences, all of them deliberate:
+    ///
+    ///  * A locked item carries no exterior loss, so a separator laid flush against
+    ///    the container edge is not permanently "colliding" with it.
+    ///  * Two locked items carry no pair loss with each other, so overlapping
+    ///    scenery is not a collision anyone can resolve.
+    ///  * A MOVABLE item reaching past `virtual_width` carries exterior loss even
+    ///    though it is still physically inside the container. That is what makes
+    ///    the virtual edge an objective rather than a label.
+    pub fn new_movable_width(l: &Layout, locked: Arc<HashSet<usize>>, virtual_width: f32) -> Self {
+        let size = l.placed_items().len();
+
+        let mut ot = Self {
+            size,
+            pk_idx_map: l.placed_items().keys().enumerate()
+                .map(|(i, pk)| (pk, i))
+                .collect(),
+            pair_collisions: PairMatrix::new(size),
+            container_collisions: vec![CTEntry { weight: 1.0, loss: 0.0 }; size],
+            locked,
+            locked_indices: vec![false; size],
+            virtual_width: Some(virtual_width),
+        };
+
+        for (pk, pi) in l.placed_items().iter() {
+            ot.locked_indices[ot.pk_idx_map[pk]] = ot.locked.contains(&pi.item().idx());
+        }
+
+        l.placed_items().keys().for_each(|pk| {
+            ot.recompute_loss_for_item(pk, l)
+        });
+
+        debug_assert!(tracker_matches_layout(&ot, l));
+
+        ot
+    }
+
+    /// The right edge this tracker quantifies against, if it is not the container's.
+    pub fn virtual_width(&self) -> Option<f32> {
+        self.virtual_width
+    }
+
+    /// Whether an item index is locked. Always false in upstream mode.
+    pub fn is_locked(&self, item_idx: usize) -> bool {
+        self.virtual_width.is_some() && self.locked.contains(&item_idx)
+    }
+
+    /// The bbox this tracker measures exterior loss against: the container's, with
+    /// its right edge pulled in to the virtual width in movable-width mode.
+    pub fn loss_bbox(&self, l: &Layout) -> jagua_rs::geometry::primitives::Rect {
+        let mut bbox = l.container().outer_cd().bbox();
+        if let Some(virtual_width) = self.virtual_width {
+            bbox.x_max = virtual_width;
+        }
+        bbox
     }
 
     fn recompute_loss_for_item(&mut self, pk: PItemKey, l: &Layout) {
@@ -63,10 +140,16 @@ impl CollisionTracker {
         collector.remove_by_entity(&BasicHazardEntity::from((pk, pi)));
 
         // For each colliding hazard, quantify the collision and store it in the tracker
+        let self_locked = self.is_locked(pi.item().idx());
         for (_, haz) in collector.iter() {
             match haz {
                 BasicHazardEntity::PlacedItem { pk: other_pk, .. } => {
-                    let shape_other = l.placed_items()[*other_pk].shape();
+                    let other = &l.placed_items()[*other_pk];
+                    // Scenery overlapping scenery is nobody's collision to resolve.
+                    if self_locked && self.is_locked(other.item().idx()) {
+                        continue;
+                    }
+                    let shape_other = other.shape();
                     let idx_other = self.pk_idx_map[*other_pk];
 
                     let loss = quantify_collision_poly_poly(shape, shape_other);
@@ -74,11 +157,25 @@ impl CollisionTracker {
                     self.pair_collisions[(idx, idx_other)].loss = loss;
                 }
                 BasicHazardEntity::Exterior => {
-                    let loss = quantify_collision_poly_container(shape, l.container().outer_cd().bbox());
+                    if self_locked {
+                        continue;
+                    }
+                    let loss = quantify_collision_poly_container(shape, self.loss_bbox(l));
                     assert!(loss > 0.0, "loss for a collision should be > 0.0");
                     self.container_collisions[idx].loss = loss;
                 }
                 _ => unimplemented!("unsupported hazard entity"),
+            }
+        }
+
+        // The CDE raises no `Exterior` hazard for an item past the virtual width but
+        // still inside the physical container, so that overhang has to be charged
+        // here rather than read off a hazard.
+        if let Some(virtual_width) = self.virtual_width {
+            if !self_locked && shape.bbox().x_max > virtual_width {
+                let loss = quantify_collision_poly_container(shape, self.loss_bbox(l));
+                assert!(loss > 0.0, "loss for a virtual-width overhang should be > 0.0");
+                self.container_collisions[idx].loss = self.container_collisions[idx].loss.max(loss);
             }
         }
     }
@@ -86,6 +183,8 @@ impl CollisionTracker {
     pub fn restore_but_keep_weights(&mut self, cts: &CTSnapshot, layout: &Layout) {
         //Copy the loss and keys, but keep the weights
         self.pk_idx_map = cts.pk_idx_map.clone();
+        //The locked flags are keyed by slot, so they travel with the key mapping.
+        self.locked_indices.clone_from(&cts.locked_indices);
         self.pair_collisions.data.iter_mut()
             .zip(cts.pair_collisions.data.iter())
             .for_each(|(a, b)| a.loss = b.loss);
@@ -178,6 +277,19 @@ impl CollisionTracker {
     }
 
     pub fn get_total_loss(&self) -> f32 {
+        if self.virtual_width.is_some() {
+            // Sum per-MOVABLE-item loss rather than over the triangular matrix, so
+            // that locked items contribute nothing of their own. The scale differs
+            // from upstream's -- a movable<->movable pair is counted from both ends
+            // here, a movable<->locked pair only from the movable's -- which gives
+            // collisions with scenery half the GLS emphasis. Deliberate, and the
+            // only property the phases rely on is preserved: zero still means every
+            // movable is separated from everything and inside the virtual width.
+            return self.pk_idx_map.iter()
+                .filter(|(_, idx)| !self.locked_indices[**idx])
+                .map(|(pk, _)| self.get_loss(pk))
+                .sum();
+        }
         let cont_o = self.container_collisions.iter().map(|e| e.loss).sum::<f32>();
 
         let pair_o = self.pair_collisions.data.iter()

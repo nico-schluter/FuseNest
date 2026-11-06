@@ -12,6 +12,8 @@ use jagua_rs::geometry::Transformation;
 use jagua_rs::probs::spp::entities::{SPInstance, SPProblem, SPSolution};
 use log::info;
 use rand::{Rng, SeedableRng};
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 use rand::rngs::Xoshiro256PlusPlus;
 
@@ -32,7 +34,12 @@ pub fn optimize(
     terminator: &mut impl Terminator,
     expl_config: &ExplorationConfig,
     cmpr_config: &CompressionConfig,
-    initial_solution: Option<&SPSolution>
+    initial_solution: Option<&SPSolution>,
+    // FuseNest fork: item indices that are LOCKED -- immovable items pre-placed by
+    // the caller in `initial_solution`, present as hazards but never moved and not
+    // counted toward the width objective. Pass an empty set for upstream behaviour,
+    // which is then reproduced exactly.
+    locked: Arc<HashSet<usize>>,
 ) -> anyhow::Result<SPSolution> {
     let mut next_rng = || Xoshiro256PlusPlus::seed_from_u64(rng.next_u64());
     
@@ -53,7 +60,7 @@ pub fn optimize(
     // Begin by executing the exploration phase
     sol_listener.report_phase(OptimizationPhase::Exploration);
     terminator.new_timeout(expl_config.time_limit);
-    let mut expl_separator = Separator::new(start_prob, next_rng(), expl_config.separator_config);
+    let mut expl_separator = Separator::new(start_prob, next_rng(), expl_config.separator_config, locked.clone());
     let solutions = exploration_phase(
         &mut expl_separator,
         sol_listener,
@@ -65,7 +72,11 @@ pub fn optimize(
     // Start the compression phase from the final solution from the exploration phase
     sol_listener.report_phase(OptimizationPhase::Compression);
     terminator.new_timeout(cmpr_config.time_limit);
-    let mut cmpr_separator = Separator::new(expl_separator.prob, next_rng(), cmpr_config.separator_config);
+    let mut cmpr_separator = Separator::new(expl_separator.prob, next_rng(), cmpr_config.separator_config, locked);
+    // Exploration leaves `prob` at whatever width its last attempt used, which may be
+    // an infeasible one; aim compression at the width of the solution it is given.
+    let final_explore_width = cmpr_separator.solution_width(&final_explore_sol);
+    cmpr_separator.set_virtual_width(final_explore_width);
     let cmpr_sol = compression_phase(
         &mut cmpr_separator,
         &final_explore_sol,
@@ -82,16 +93,22 @@ pub fn optimize(
 
 /// Conservative lower bound on strip width, including the container's inset.
 /// Leave relative slack for f32 rotation and bounding-box rounding near exact fits.
-fn strip_width_lower_bound(prob: &SPProblem) -> f32 {
+///
+/// FuseNest fork: `locked` items are excluded from both the area bound and the
+/// per-item width bound. Their area is scenery, not content -- counting a sheet
+/// nest's separators here would raise the bound by their combined area and stop
+/// compression while real width was still there to win.
+fn strip_width_lower_bound(prob: &SPProblem, locked: &HashSet<usize>) -> f32 {
     const REL_TOL: f32 = 1e-6;
     let container = prob.layout().container().outer_cd().bbox();
     let width_inset = prob.strip_width() - container.width();
     let area: f64 = prob.instance().items.iter()
+        .filter(|(item, _)| !locked.contains(&item.idx()))
         .map(|(item, qty)| f64::from(item.shape_cd().area()) * *qty as f64)
         .sum();
     let mut width_lower_bound = (area / f64::from(container.height())) as f32 * (1.0 - REL_TOL);
 
-    for (item, _) in &prob.instance().items {
+    for (item, _) in prob.instance().items.iter().filter(|(item, _)| !locked.contains(&item.idx())) {
         let rotations = match item.allowed_orientations().rotations() {
             RotationRange::None => &[0.0][..],
             RotationRange::Discrete(rotations) => rotations.as_slice(),

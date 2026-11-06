@@ -83,6 +83,8 @@ fn start_optimizer(
                 &config.expl_cfg,
                 &config.cmpr_cfg,
                 initial_solution.as_ref(),
+                // Nothing is locked from the TUI, so this is upstream behaviour exactly.
+                std::sync::Arc::new(std::collections::HashSet::new()),
             )
         })
         .expect("failed to start optimizer")

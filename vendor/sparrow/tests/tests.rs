@@ -17,6 +17,8 @@ mod integration_tests {
     use rand::SeedableRng;
     use test_case::test_case;
     use sparrow::util::listener::DummySolListener;
+    use std::collections::HashSet;
+    use std::sync::Arc;
 
     const EXPLORE_TIMEOUT: Duration = Duration::from_secs(10);
     const COMPRESS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -60,7 +62,7 @@ mod integration_tests {
         let restored = jagua_rs::probs::spp::io::import_solution(&instance, &exported)?;
         assert!(jagua_rs::entities::Layout::from_snapshot(restored.layout_snapshot()).is_collision_free());
         assert_eq!(restored.layout_snapshot().placed_items().len(), instance.total_item_qty());
-        let mut separator = Separator::new(builder.prob, builder.rng, config.expl_cfg.separator_config);
+        let mut separator = Separator::new(builder.prob, builder.rng, config.expl_cfg.separator_config, Arc::new(HashSet::new()));
 
         let sols = exploration_phase(&mut separator, &mut sol_listener, &terminator, &config.expl_cfg);
         let final_explore_sol = sols.last().expect("no solutions found during exploration");

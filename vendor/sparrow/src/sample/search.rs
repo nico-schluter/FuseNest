@@ -17,12 +17,19 @@ pub struct SampleConfig {
 }
 
 /// Algorithm 6 and Figure 7 from https://doi.org/10.48550/arXiv.2509.13329
-pub fn search_placement(l: &Layout, item: &Item, ref_pk: Option<PItemKey>, mut evaluator: impl SampleEvaluator, sample_config: SampleConfig, rng: &mut impl Rng) -> (Option<(DTransformation, SampleEval)>, usize) {
+/// `virtual_width` is the FuseNest fork's right edge for sampling: samples are
+/// drawn inside the container with its right edge pulled in to this, so the search
+/// never spends evaluations on the empty sheets past the current objective width.
+/// Pass the physical strip width for upstream behaviour.
+pub fn search_placement(l: &Layout, item: &Item, ref_pk: Option<PItemKey>, mut evaluator: impl SampleEvaluator, sample_config: SampleConfig, rng: &mut impl Rng, virtual_width: f32) -> (Option<(DTransformation, SampleEval)>, usize) {
     let item_min_dim = f32::min(item.shape_cd().bbox().width(), item.shape_cd().bbox().height());
 
     let mut best_samples = BestSamples::new(sample_config.n_coord_descents, item_min_dim * UNIQUE_SAMPLE_THRESHOLD);
 
     //Create the two uniform samplers, one focussed around the reference placement, one for the whole container
+    let mut container_bbox = l.container().outer_cd().bbox();
+    container_bbox.x_max = virtual_width;
+
     let focussed_sampler = match ref_pk {
         Some(ref_pk) => {
             //Add the current placement (and evaluation) as a candidate
@@ -34,11 +41,11 @@ pub fn search_placement(l: &Layout, item: &Item, ref_pk: Option<PItemKey>, mut e
 
             //Create a uniform sampler focussed around the current placement
             let pi_bbox = l.placed_items()[ref_pk].shape().bbox();
-            UniformBBoxSampler::new(pi_bbox, item, l.container().outer_cd().bbox())
+            UniformBBoxSampler::new(pi_bbox, item, container_bbox)
         }
         None => None,
     };
-    let container_sampler = UniformBBoxSampler::new(l.container().outer_cd().bbox(), item, l.container().outer_cd().bbox());
+    let container_sampler = UniformBBoxSampler::new(container_bbox, item, container_bbox);
 
     //Perform the focussed sampling
     if let Some(focussed_sampler) = focussed_sampler {

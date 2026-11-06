@@ -15,11 +15,18 @@ pub fn tracker_matches_layout(ct: &CollisionTracker, l: &Layout) -> bool {
     assert!(assertions::layout_qt_matches_fresh_qt(l));
 
     for (pk1, pi1) in l.placed_items().iter() {
+        // FuseNest fork: a locked item is loss-exempt against the container and
+        // against other locked items, so neither cross-check below applies to it.
+        let locked1 = ct.is_locked(pi1.item().idx());
         let mut collector = BasicHazardCollector::new();
         l.cde().collect_poly_collisions(pi1.shape(), &NoFilter, &mut collector);
         collector.remove_by_entity(&BasicHazardEntity::from((pk1, pi1)));
         assert_eq!(ct.get_pair_loss(pk1, pk1), 0.0);
         for (pk2, pi2) in l.placed_items().iter().filter(|(k, _)| *k != pk1) {
+            if locked1 && ct.is_locked(pi2.item().idx()) {
+                assert_eq!(ct.get_pair_loss(pk1, pk2), 0.0);
+                continue;
+            }
             let stored_loss = ct.get_pair_loss(pk1, pk2);
             match collector.iter().any(|(_, he)| he == &BasicHazardEntity::from((pk2, pi2))) {
                 true => {
@@ -120,9 +127,17 @@ pub fn tracker_matches_layout(ct: &CollisionTracker, l: &Layout) -> bool {
                 }
             }
         }
-        if collector.contains_entity(&BasicHazardEntity::Exterior) {
+        // FuseNest fork: the expected exterior loss is measured against the
+        // tracker's own loss bbox (the container's, with its right edge pulled in to
+        // the virtual width), and a movable can carry it from the virtual edge alone
+        // with no `Exterior` hazard to show for it.
+        let bbox = ct.loss_bbox(l);
+        let past_virtual_edge = pi1.shape().bbox().x_max > bbox.x_max;
+        if locked1 {
+            assert_eq!(ct.get_container_loss(pk1), 0.0);
+        } else if collector.contains_entity(&BasicHazardEntity::Exterior) || past_virtual_edge {
             let stored_loss = ct.get_container_loss(pk1);
-            let calc_loss = quantify_collision_poly_container(pi1.shape(), l.container().outer_cd().bbox());
+            let calc_loss = quantify_collision_poly_container(pi1.shape(), bbox);
             assert_approx_eq!(f32, stored_loss, calc_loss, ulps = 5);
         } else {
             assert_eq!(ct.get_container_loss(pk1), 0.0);

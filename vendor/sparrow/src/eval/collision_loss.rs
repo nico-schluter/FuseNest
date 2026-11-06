@@ -17,6 +17,10 @@ pub(super) struct CollisionLossEvaluator<'a> {
     current_pk: PItemKey,
     loss: f32,
     loss_bound: f32,
+    /// FuseNest fork: the container loss already charged for reaching past the
+    /// tracker's virtual right edge, so the `Exterior` branch does not charge it
+    /// twice. Always zero in upstream mode.
+    virtual_charge: f32,
     #[cfg(feature = "simd")]
     poles_soa: CirclesSoA,
 }
@@ -29,16 +33,29 @@ impl<'a> CollisionLossEvaluator<'a> {
             current_pk,
             loss: 0.0,
             loss_bound: f32::INFINITY,
+            virtual_charge: 0.0,
             #[cfg(feature = "simd")]
             poles_soa: CirclesSoA::new(),
         }
     }
 
-    pub(super) fn reload(&mut self, loss_bound: f32, _shape: &SPolygon) {
-        self.loss = 0.0;
+    pub(super) fn reload(&mut self, loss_bound: f32, shape: &SPolygon) {
         self.loss_bound = loss_bound;
+        // FuseNest fork: an item reaching past the tracker's virtual right edge is
+        // out of bounds even though the CDE raises no `Exterior` hazard for it -- it
+        // is still inside the PHYSICAL container. Charge that up front. The
+        // `Exterior` branch then adds nothing further: both are the same container
+        // loss measured against the same bbox, so they are a maximum, not a sum.
+        self.virtual_charge = match self.ct.virtual_width() {
+            Some(_) if shape.bbox().x_max > self.ct.loss_bbox(self.layout).x_max => {
+                quantify_collision_poly_container(shape, self.ct.loss_bbox(self.layout))
+                    * self.ct.get_container_weight(self.current_pk)
+            }
+            _ => 0.0,
+        };
+        self.loss = self.virtual_charge;
         #[cfg(feature = "simd")]
-        self.poles_soa.load(&_shape.surrogate().poles);
+        self.poles_soa.load(&shape.surrogate().poles);
     }
 
     pub(super) fn add(&mut self, hazard: BasicHazardEntity, shape: &SPolygon) -> bool {
@@ -87,8 +104,9 @@ impl<'a> CollisionLossEvaluator<'a> {
                     (loss <= max_loss).then_some(loss)
                 }
             }
+            BasicHazardEntity::Exterior if self.virtual_charge > 0.0 => Some(0.0),
             BasicHazardEntity::Exterior => Some(
-                quantify_collision_poly_container(shape, self.layout.container().outer_cd().bbox())
+                quantify_collision_poly_container(shape, self.ct.loss_bbox(self.layout))
                     * self.ct.get_container_weight(self.current_pk),
             ),
             _ => unimplemented!("unsupported hazard entity"),

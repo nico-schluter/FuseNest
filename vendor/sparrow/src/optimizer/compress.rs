@@ -15,8 +15,11 @@ pub fn compression_phase(
     term: &impl Terminator,
     config: &CompressionConfig
 ) -> SPSolution {
-    let width_lower_bound = super::strip_width_lower_bound(&sep.prob);
+    let width_lower_bound = super::strip_width_lower_bound(&sep.prob, &sep.locked);
     let mut best_sol = init_sol.clone();
+    // The objective width of `best_sol`. Equal to its strip width upstream; with
+    // items locked it is the movables-only extent, which is what we compress.
+    let mut best_width = sep.solution_width(&best_sol);
     let start = Instant::now();
     let mut n_failed_attempts = 0;
 
@@ -37,18 +40,20 @@ pub fn compression_phase(
 
     // As long as the shrink step size is above the minimum, keep attempting to compress
     while !term.kill() && let step = shrink_step_size(n_failed_attempts) && step >= config.shrink_range.1 {
-        let width = best_sol.strip_width();
+        let width = best_width;
         let next_width = width * (1.0 - step);
         if next_width < width_lower_bound || next_width >= width {
             info!("[CMPR] stopping at strip width lower bound: {:.3}", width_lower_bound);
             break;
         }
         sol_listener.report_compression_progress(step);
-        match attempt_to_compress(sep, &best_sol, step, term, sol_listener) {
+        match attempt_to_compress(sep, &best_sol, best_width, step, term, sol_listener) {
             Some(compacted_sol) => {
-                info!("[CMPR] success at {:.3}% ({:.3} | {:.3}%)", step * 100.0, compacted_sol.strip_width(), compacted_sol.density() * 100.0);
+                let compacted_width = sep.solution_width(&compacted_sol);
+                info!("[CMPR] success at {:.3}% ({:.3} | {:.3}%)", step * 100.0, compacted_width, sep.objective_density() * 100.0);
                 sol_listener.report(ReportType::CmprFeas, &compacted_sol);
                 best_sol = compacted_sol;
+                best_width = compacted_width;
             }
             None => {
                 info!("[CMPR] failed at {:.3}%", step * 100.0);
@@ -61,14 +66,14 @@ pub fn compression_phase(
 }
 
 
-fn attempt_to_compress(sep: &mut Separator, init_sol: &SPSolution, r_shrink: f32, term: &impl Terminator, sol_listener: &mut impl SolutionListener) -> Option<SPSolution> {
+fn attempt_to_compress(sep: &mut Separator, init_sol: &SPSolution, init_width: f32, r_shrink: f32, term: &impl Terminator, sol_listener: &mut impl SolutionListener) -> Option<SPSolution> {
     // Restore to the initial solution and width
-    sep.change_strip_width(init_sol.strip_width(), None).ok()?;
+    sep.change_strip_width(init_width, None).ok()?;
     sep.rollback(init_sol, None);
 
     // Shrink the container by the provided amount at a random position
-    let new_width = init_sol.strip_width() * (1.0 - r_shrink);
-    let split_pos = sep.rng.random_range(0.0..sep.prob.strip_width());
+    let new_width = init_width * (1.0 - r_shrink);
+    let split_pos = sep.rng.random_range(0.0..sep.objective_width());
     sep.change_strip_width(new_width, Some(split_pos)).ok()?;
 
     // Try to separate layout, if all collisions are eliminated, return the solution

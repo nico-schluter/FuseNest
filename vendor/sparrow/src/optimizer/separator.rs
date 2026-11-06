@@ -17,6 +17,8 @@ use rand::rngs::Xoshiro256PlusPlus;
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
 use rayon::ThreadPool;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SeparatorConfig {
@@ -35,17 +37,34 @@ pub struct Separator {
     pub workers: Vec<SeparatorWorker>,
     pub config: SeparatorConfig,
     pub thread_pool: Option<ThreadPool>,
+    /// FuseNest fork: item indices that are LOCKED -- immovable items present at
+    /// fixed transformations. They are ordinary hazards, so movables must separate
+    /// from them, but they are never moved, swapped, shifted or disrupted. Empty
+    /// for upstream callers, and every path below then behaves exactly as upstream.
+    pub locked: Arc<HashSet<usize>>,
+    /// FuseNest fork: the strip's VIRTUAL right edge, measured over movable items
+    /// only. It is what the width objective minimizes. The jagua strip, container
+    /// and CDE stay frozen at their warm-start extents, so locked items neither
+    /// move with a resize nor impose a floor on how far the objective can shrink.
+    /// Equal to the physical strip width whenever `locked` is empty.
+    virtual_width: f32,
 }
 
 impl Separator {
-    pub fn new(prob: SPProblem, mut rng: Xoshiro256PlusPlus, config: SeparatorConfig) -> Self {
-        let ct = CollisionTracker::new(prob.layout());
+    pub fn new(prob: SPProblem, mut rng: Xoshiro256PlusPlus, config: SeparatorConfig, locked: Arc<HashSet<usize>>) -> Self {
+        let virtual_width = match locked.is_empty() {
+            true => prob.strip_width(),
+            false => movable_extent(prob.layout(), &locked),
+        };
+        let ct = Self::make_tracker(&prob, &locked, virtual_width);
         let workers = (0..config.n_workers).map(|_|
             SeparatorWorker {
                 prob: prob.clone(),
                 ct: ct.clone(),
                 rng: Xoshiro256PlusPlus::seed_from_u64(rng.random()),
                 sample_config: config.sample_config,
+                locked: locked.clone(),
+                virtual_width,
             }).collect();
 
         let pool = if cfg!(target_arch = "wasm32") {
@@ -64,18 +83,79 @@ impl Separator {
             workers,
             config,
             thread_pool: pool,
+            locked,
+            virtual_width,
         }
+    }
+
+    fn make_tracker(prob: &SPProblem, locked: &Arc<HashSet<usize>>, virtual_width: f32) -> CollisionTracker {
+        match locked.is_empty() {
+            true => CollisionTracker::new(prob.layout()),
+            false => CollisionTracker::new_movable_width(prob.layout(), locked.clone(), virtual_width),
+        }
+    }
+
+    /// The width the objective minimizes: the physical strip width upstream, the
+    /// movables-only virtual edge once anything is locked.
+    pub fn objective_width(&self) -> f32 {
+        self.virtual_width
+    }
+
+    /// Density against [`Self::objective_width`], counting movable item area only.
+    /// `SPProblem::density` would charge the locked separators' own area to the
+    /// layout and measure it against the full physical strip, which for a sheet
+    /// nest is neither the numerator nor the denominator anyone means.
+    pub fn objective_density(&self) -> f32 {
+        if self.locked.is_empty() {
+            return self.prob.density();
+        }
+        let l = self.prob.layout();
+        let movable_area: f32 = l.placed_items().iter()
+            .filter(|(_, pi)| !self.locked.contains(&pi.item().idx()))
+            .map(|(_, pi)| pi.item().area())
+            .sum();
+        let height = l.container().outer_cd().bbox().height();
+        match self.virtual_width * height {
+            a if a > 0.0 => movable_area / a,
+            _ => 0.0,
+        }
+    }
+
+    /// Re-aims the objective at `width` without touching the physical strip (unless
+    /// nothing is locked, where the two are the same thing). Items are NOT shifted:
+    /// use [`Self::change_strip_width`] for that.
+    pub fn set_virtual_width(&mut self, width: f32) {
+        self.virtual_width = width;
+        if self.locked.is_empty() {
+            // Upstream equivalence: with nothing locked the virtual edge IS the strip.
+            let _ = self.prob.change_strip_width(width);
+        }
+        self.ct = Self::make_tracker(&self.prob, &self.locked, self.virtual_width);
+        self.rebuild_workers();
+    }
+
+    /// The objective width of an already-saved solution. Separate from
+    /// [`Self::objective_width`] because the phases compare candidate solutions
+    /// they are not currently holding in `prob`.
+    pub fn solution_width(&self, sol: &SPSolution) -> f32 {
+        if self.locked.is_empty() {
+            return sol.strip_width();
+        }
+        sol.layout_snapshot().placed_items().iter()
+            .filter(|(_, pi)| !self.locked.contains(&pi.item().idx()))
+            .map(|(_, pi)| pi.shape().bbox().x_max)
+            .fold(0.0_f32, f32::max)
     }
 
     /// Algorithm 9 from https://doi.org/10.48550/arXiv.2509.13329
     pub fn separate(&mut self, term: &impl Terminator, sol_listener: &mut impl SolutionListener) -> (SPSolution, CTSnapshot) {
         let mut min_loss_sol = (self.prob.save(), self.ct.save());
         let mut min_loss = self.ct.get_total_loss();
-        let strip_width = self.prob.strip_width();
-        let density = self.prob.density() * 100.0;
+        let strip_width = self.objective_width();
+        let density = self.objective_density() * 100.0;
         let progress = |iteration, min_loss| SeparationProgress { strip_width, density, iteration, min_loss };
         sol_listener.report_separation_progress(progress(0, min_loss));
-        log!(self.config.log_level,"[SEP] separating at width: {:.3} and loss: {} ", self.prob.strip_width(), FMT().fmt2(min_loss));
+        log!(self.config.log_level,"[SEP] separating at width: {:.3} and loss: {} ", strip_width, FMT().fmt2(min_loss));
 
         let mut n_strikes = 0;
         let mut n_iter = 0;
@@ -201,7 +281,7 @@ impl Separator {
             }
             None => {
                 //otherwise, rebuild it
-                self.ct = CollisionTracker::new(self.prob.layout());
+                self.ct = Self::make_tracker(&self.prob, &self.locked, self.virtual_width);
             }
         }
     }
@@ -234,18 +314,24 @@ impl Separator {
     }
 
     pub fn change_strip_width(&mut self, new_width: f32, split_position: Option<f32>) -> anyhow::Result<()> {
+        let old_width = self.objective_width();
         //if no split position is provided, use the center of the strip
-        let split_position = split_position.unwrap_or(self.prob.strip_width() / 2.0);
-        let delta = new_width - self.prob.strip_width();
+        let split_position = split_position.unwrap_or(old_width / 2.0);
+        let delta = new_width - old_width;
 
-        //shift all items right of the split position
+        //shift all items right of the split position. A locked item is at a fixed
+        //transformation by definition, so it is never among them -- which is also
+        //why the physical strip must NOT be resized under it (see `virtual_width`).
         let items_to_shift = self.prob.layout().placed_items().iter()
-            .filter(|(_, pi)| pi.shape().centroid().0 > split_position)
+            .filter(|(_, pi)| pi.shape().centroid().0 > split_position && !self.locked.contains(&pi.item().idx()))
             .map(|(k, pi)| (k, pi.d_transf()))
             .collect_vec();
 
-        self.prob.change_strip_width(new_width)
-            .inspect_err(|error| error!("[SEP] unexpected resize failure at width {new_width:.3}: {error:#}"))?;
+        if self.locked.is_empty() {
+            self.prob.change_strip_width(new_width)
+                .inspect_err(|error| error!("[SEP] unexpected resize failure at width {new_width:.3}: {error:#}"))?;
+        }
+        self.virtual_width = new_width;
 
         // The tracker still describes the old container; rebuild it after all shifts.
         for (pik, dtransf) in items_to_shift {
@@ -259,18 +345,33 @@ impl Separator {
         }
 
         //rebuild the collision tracker
-        self.ct = CollisionTracker::new(self.prob.layout());
+        self.ct = Self::make_tracker(&self.prob, &self.locked, self.virtual_width);
 
         //rebuild the workers
+        self.rebuild_workers();
+        debug!("[SEP] changed strip width to {:.3}", new_width);
+        Ok(())
+    }
+
+    fn rebuild_workers(&mut self) {
         self.workers.iter_mut().for_each(|opt| {
             *opt = SeparatorWorker {
                 prob: self.prob.clone(),
                 ct: self.ct.clone(),
                 rng: Xoshiro256PlusPlus::seed_from_u64(self.rng.random()),
                 sample_config: self.config.sample_config,
+                locked: self.locked.clone(),
+                virtual_width: self.virtual_width,
             };
         });
-        debug!("[SEP] changed strip width to {:.3}", new_width);
-        Ok(())
     }
+}
+
+/// The rightmost extent of the MOVABLE items in a layout -- the width a sheet nest
+/// is actually trying to minimize, with the locked separators discounted.
+fn movable_extent(l: &jagua_rs::entities::Layout, locked: &HashSet<usize>) -> f32 {
+    l.placed_items().iter()
+        .filter(|(_, pi)| !locked.contains(&pi.item().idx()))
+        .map(|(_, pi)| pi.shape().bbox().x_max)
+        .fold(0.0_f32, f32::max)
 }

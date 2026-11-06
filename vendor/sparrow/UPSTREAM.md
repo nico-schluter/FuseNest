@@ -72,13 +72,29 @@ Every touched file, one line each:
 - `src/quantify/tracker.rs` -- locked items are excluded from total loss and
   from locked-vs-locked and locked-vs-exterior loss; a movable's overhang past
   `virtual_width` is counted as exterior loss.
-- `src/eval/collision_loss.rs`, `src/sample/search.rs` -- sample evaluation and
-  uniform sampling use the virtual container right edge. Note that the CDE
-  raises no `Exterior` hazard for an item past the virtual width but inside the
-  physical strip, so the virtual-width loss term is added explicitly rather
-  than read off the hazard.
-- `src/optimizer/lbf.rs` -- `place_item` grew the strip x1.2 behind an
-  `assert!`, a panic once the strip ran away. It is now a bounded loop that
-  reports a `ConstructionError` instead, because a movable crowded out by
-  locked separators must never abort the run.
-- `src/main.rs`, `src/bench.rs`, `tests/tests.rs` -- pass an empty locked set.
+- `src/eval/collision_loss.rs` -- exterior loss is measured against the tracker's
+  loss bbox rather than the container's. The CDE raises no `Exterior` hazard for
+  an item past the virtual width but still inside the physical container, so that
+  overhang is charged up front in `reload`; the `Exterior` branch then adds
+  nothing further, because both are the same container loss against the same bbox
+  and must be a maximum, not a sum.
+- `src/eval/sep_evaluator.rs` -- a sample dominated by that charge alone is
+  rejected without searching, and a sample clear of every hazard is still a
+  collision if it carries one.
+- `src/sample/search.rs` -- uniform sampling takes the virtual right edge, so the
+  search does not spend evaluations out in the empty sheets.
+- `src/util/assertions.rs` -- `tracker_matches_layout` learns the same three
+  rules, so the debug assertions keep their teeth in movable-width mode instead
+  of being switched off.
+- `src/optimizer/lbf.rs` -- the construction search is handed the physical strip
+  width: there is no virtual edge yet while the initial solution is being built.
+- `src/cli.rs`, `src/bench.rs`, `src/tui/runtime.rs`, `tests/tests.rs` -- pass an
+  empty locked set.
+
+Two patches listed in the plan turned out to be unnecessary on this rev, because
+upstream had already made them between nestfox's snapshot and this one:
+
+- `LBFBuilder::place_item`'s runaway strip growth is already a bounded loop
+  returning `ConstructionError`, not an `assert!`.
+- `SeparationEvaluator` needs no locked-ness of its own: the virtual width lives
+  on the `CollisionTracker` it already borrows.

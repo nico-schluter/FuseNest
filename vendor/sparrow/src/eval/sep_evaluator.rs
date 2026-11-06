@@ -66,6 +66,11 @@ impl<'a> SampleEvaluator for SeparationEvaluator<'a> {
         self.collector.insert(self.current_hazard.0, self.current_hazard.1);
         let n_ignored_hazards = self.collector.len();
         self.loss_evaluator.reload(loss_bound, shape);
+        // The reload may already have charged this sample for overhanging the
+        // virtual right edge; if that alone is dominated there is nothing to search.
+        if self.loss_evaluator.loss() > loss_bound {
+            return SampleEval::Invalid;
+        }
 
         let mut should_stop = |hazard| self.loss_evaluator.add(hazard, shape);
         let stopped_during_surrogate_check = cde.collect_surrogate_collisions_until(
@@ -87,8 +92,12 @@ impl<'a> SampleEvaluator for SeparationEvaluator<'a> {
 
                 match stopped_during_precise_check {
                     true => SampleEval::Invalid,
+                    // Clear of every hazard, but possibly still past the virtual edge.
                     false if self.collector.len() == n_ignored_hazards => {
-                        SampleEval::Clear { loss: 0.0 }
+                        match self.loss_evaluator.loss() {
+                            0.0 => SampleEval::Clear { loss: 0.0 },
+                            loss => SampleEval::Collision { loss },
+                        }
                     }
                     false => SampleEval::Collision {
                         loss: self.loss_evaluator.loss(),

@@ -13,6 +13,8 @@ use rand::prelude::SliceRandom;
 use std::iter::Sum;
 use std::ops::AddAssign;
 use rand::rngs::Xoshiro256PlusPlus;
+use std::collections::HashSet;
+use std::sync::Arc;
 use tap::Tap;
 
 pub struct SeparatorWorker {
@@ -20,6 +22,10 @@ pub struct SeparatorWorker {
     pub ct: CollisionTracker,
     pub rng: Xoshiro256PlusPlus,
     pub sample_config: SampleConfig,
+    /// FuseNest fork: locked item indices, never chosen as a move candidate.
+    pub locked: Arc<HashSet<usize>>,
+    /// FuseNest fork: the virtual right edge the search treats as the container's.
+    pub virtual_width: f32,
 }
 
 impl SeparatorWorker {
@@ -32,9 +38,11 @@ impl SeparatorWorker {
 
     /// Algorithm 5 from https://doi.org/10.48550/arXiv.2509.13329
     pub fn move_items(&mut self) -> SepStats {
-        // Collect all colliding items in a random order
+        // Collect all colliding items in a random order. A locked item may well be
+        // colliding -- a movable can be shifted onto one by a width change -- but it
+        // is the movable that has to yield, so locked items are not candidates.
         let candidates = self.prob.layout().placed_items().keys()
-            .filter(|pk| self.ct.get_loss(*pk) > 0.0)
+            .filter(|pk| self.ct.get_loss(*pk) > 0.0 && !self.locked.contains(&self.prob.layout().placed_items()[*pk].item().idx()))
             .collect_vec()
             .tap_mut(|v| v.shuffle(&mut self.rng));
 
@@ -52,7 +60,7 @@ impl SeparatorWorker {
 
                 // Perform the search for a better position for the item
                 let (best_sample, n_evals) =
-                    search::search_placement(self.prob.layout(), item, Some(pk), evaluator, self.sample_config, &mut self.rng);
+                    search::search_placement(self.prob.layout(), item, Some(pk), evaluator, self.sample_config, &mut self.rng, self.virtual_width);
 
                 let (new_dt, _eval) = best_sample.expect("search_placement should always return a sample");
 

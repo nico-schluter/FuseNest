@@ -22,6 +22,8 @@ use sparrow::optimizer::compress::compression_phase;
 use sparrow::optimizer::explore::exploration_phase;
 use sparrow::util::listener::DummySolListener;
 use sparrow::util::terminator::BasicTerminator;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 pub const OUTPUT_DIR: &str = "output";
 
@@ -92,7 +94,7 @@ fn main() -> Result<()> {
                             return;
                         }
                     };
-                    let mut expl_separator = Separator::new(builder.prob, next_rng(), config.expl_cfg.separator_config);
+                    let mut expl_separator = Separator::new(builder.prob, next_rng(), config.expl_cfg.separator_config, Arc::new(HashSet::new()));
 
                     terminator.new_timeout(config.expl_cfg.time_limit);
                     let solutions = exploration_phase(&mut expl_separator, &mut DummySolListener, &terminator, &config.expl_cfg);
@@ -101,7 +103,7 @@ fn main() -> Result<()> {
                     let start_comp = Instant::now();
 
                     terminator.new_timeout(config.cmpr_cfg.time_limit);
-                    let mut cmpr_separator = Separator::new(expl_separator.prob, next_rng(), config.cmpr_cfg.separator_config);
+                    let mut cmpr_separator = Separator::new(expl_separator.prob, next_rng(), config.cmpr_cfg.separator_config, Arc::new(HashSet::new()));
                     let cmpr_sol = compression_phase(&mut cmpr_separator, final_explore_sol, &mut DummySolListener, &terminator, &config.cmpr_cfg);
 
                     println!("[BENCH] [id:{:>3}] finished, expl: {:.3}% ({}s), cmpr: {:.3}% (+{:.3}%) ({}s)",
