@@ -1,0 +1,84 @@
+name: single bench
+
+on:
+  workflow_call:
+    inputs:
+      instance:
+        required: true
+        type: string
+      n_runs:
+        required: true
+        type: number
+      run_time_s:
+        required: true
+        type: number
+  workflow_dispatch:
+    inputs:
+      instance:
+        description: 'Instance (ignored if custom JSON URL is provided)'
+        required: true
+        type: choice
+        options: [ swim, trousers, shirts, mao, dagli, albano, marques, blaz1, fu, shapes0, shapes1, jakobs1, jakobs2, swim_c,
+          gardeyn0, gardeyn1, gardeyn2, gardeyn3, gardeyn4, gardeyn5, gardeyn6, gardeyn7, gardeyn8, gardeyn9,
+          gardeyn0_c, gardeyn1_c, gardeyn2_c, gardeyn3_c, gardeyn4_c, gardeyn5_c, gardeyn6_c, gardeyn7_c, gardeyn8_c, gardeyn9_c
+        ]
+      custom_instance_url:
+        description: 'URL to custom instance JSON (e.g. GitHub Gist raw link)'
+        required: false
+        type: string
+      n_runs:
+        description: 'Number of times to run the instance'
+        default: 16
+        required: true
+        type: number
+      run_time_s:
+        description: 'Time per run in seconds'
+        default: 1200
+        required: true
+        type: number
+jobs:
+  run-benchmark:
+    name: bench ${{ inputs.instance }} (${{ inputs.n_runs }} x ${{ inputs.run_time_s }}s)
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Prepare input JSON
+        run: |
+          if [ -n "${{ inputs.custom_instance_url }}" ]; then
+            echo "Using custom instance from URL: ${{ inputs.custom_instance_url }}"
+            curl -sSL "${{ inputs.custom_instance_url }}" -o custom_instance.json
+            file_name=$(basename "${{ inputs.custom_instance_url }}" .json)
+            echo "INSTANCE_FILE=custom_instance" >> "$GITHUB_ENV"
+            echo "INSTANCE_NAME=${file_name}" >> "$GITHUB_ENV"
+          else
+            echo "INSTANCE_FILE=data/input/${{ inputs.instance }}" >> "$GITHUB_ENV"
+            echo "INSTANCE_NAME=${{ inputs.instance }}" >> "$GITHUB_ENV"
+          fi
+      - name: Run bench
+        env:
+          RUSTFLAGS: '-C target-cpu=native -Awarnings'
+        run: |
+          export RUSTFLAGS=$RUSTFLAGS
+          output=$(cargo run --profile release --features=only_final_svg,simd --bin bench -- ${INSTANCE_FILE}.json ${{ inputs.run_time_s }} ${{ inputs.n_runs }} | tee /dev/stderr)
+          echo "$output" > "output/${INSTANCE_NAME}_bench_stdout.log"
+          {
+            echo "## Benchmark Output for \`${INSTANCE_NAME}\`"
+            echo '```'
+            echo "$output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compress output folder
+        run: |
+          mv output/ output_${INSTANCE_NAME}
+          tar -czf ${INSTANCE_NAME}_output.tar.gz output_${INSTANCE_NAME}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.INSTANCE_NAME }}-results
+          path: ${{ env.INSTANCE_NAME }}_output.tar.gz
+          retention-days: 14

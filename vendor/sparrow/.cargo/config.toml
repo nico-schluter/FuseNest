@@ -1,0 +1,5 @@
+# .cargo/config.toml
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128"
+]

@@ -1,0 +1,35 @@
+name: PR benchmark gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [ ready_for_review ]
+    branches: [ "main" ]
+    paths:
+      - '**.rs'
+      - '**.toml'
+      - '**.yml'
+
+jobs:
+  swim:
+    uses: ./.github/workflows/single_bench.yml
+    with:
+      instance: swim
+      n_runs: 16
+      run_time_s: 1200
+
+  trousers:
+    needs: swim
+    uses: ./.github/workflows/single_bench.yml
+    with:
+      instance: trousers
+      n_runs: 16
+      run_time_s: 1200
+
+  shirts:
+    needs: trousers
+    uses: ./.github/workflows/single_bench.yml
+    with:
+      instance: shirts
+      n_runs: 16
+      run_time_s: 1200

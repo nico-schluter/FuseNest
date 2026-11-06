@@ -1,0 +1,85 @@
+name: gardeyn benches (continuous)
+
+on:
+  workflow_dispatch:
+    inputs:
+      n_runs:
+        description: 'Number of times to run each instance'
+        default: 16
+        required: true
+        type: number
+      run_time_s:
+        description: 'Time per run in seconds'
+        default: 1200
+        required: true
+        type: number
+jobs:
+  gardeyn0:
+    uses: ./.github/workflows/single_bench.yml
+    with:
+      instance: gardeyn0_c
+      n_runs: ${{ fromJSON(inputs.n_runs) }}
+      run_time_s: ${{ fromJSON(inputs.run_time_s) }}
+  gardeyn1:
+    needs: gardeyn0
+    uses: ./.github/workflows/single_bench.yml
+    with:
+      instance: gardeyn1_c
+      n_runs: ${{ fromJSON(inputs.n_runs) }}
+      run_time_s: ${{ fromJSON(inputs.run_time_s) }}
+  gardeyn2:
+    needs: gardeyn1
+    uses: ./.github/workflows/single_bench.yml
+    with:
+      instance: gardeyn2_c
+      n_runs: ${{ fromJSON(inputs.n_runs) }}
+      run_time_s: ${{ fromJSON(inputs.run_time_s) }}
+  gardeyn3:
+    needs: gardeyn2
+    uses: ./.github/workflows/single_bench.yml
+    with:
+      instance: gardeyn3_c
+      n_runs: ${{ fromJSON(inputs.n_runs) }}
+      run_time_s: ${{ fromJSON(inputs.run_time_s) }}
+  gardeyn4:
+    needs: gardeyn3
+    uses: ./.github/workflows/single_bench.yml
+    with:
+      instance: gardeyn4_c
+      n_runs: ${{ fromJSON(inputs.n_runs) }}
+      run_time_s: ${{ fromJSON(inputs.run_time_s) }}
+  gardeyn5:
+    needs: gardeyn4
+    uses: ./.github/workflows/single_bench.yml
+    with:
+      instance: gardeyn5_c
+      n_runs: ${{ fromJSON(inputs.n_runs) }}
+      run_time_s: ${{ fromJSON(inputs.run_time_s) }}
+  gardeyn6:
+    needs: gardeyn5
+    uses: ./.github/workflows/single_bench.yml
+    with:
+      instance: gardeyn6_c
+      n_runs: ${{ fromJSON(inputs.n_runs) }}
+      run_time_s: ${{ fromJSON(inputs.run_time_s) }}
+  gardeyn7:
+    needs: gardeyn6
+    uses: ./.github/workflows/single_bench.yml
+    with:
+      instance: gardeyn7_c
+      n_runs: ${{ fromJSON(inputs.n_runs) }}
+      run_time_s: ${{ fromJSON(inputs.run_time_s) }}
+  gardeyn8:
+    needs: gardeyn7
+    uses: ./.github/workflows/single_bench.yml
+    with:
+      instance: gardeyn8_c
+      n_runs: ${{ fromJSON(inputs.n_runs) }}
+      run_time_s: ${{ fromJSON(inputs.run_time_s) }}
+  gardeyn9:
+    needs: gardeyn8
+    uses: ./.github/workflows/single_bench.yml
+    with:
+      instance: gardeyn9_c
+      n_runs: ${{ fromJSON(inputs.n_runs) }}
+      run_time_s: ${{ fromJSON(inputs.run_time_s) }}

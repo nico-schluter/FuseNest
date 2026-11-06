@@ -12,9 +12,12 @@ crate-type = ["staticlib"]
 [dependencies]
 # sparrow is NOT on crates.io (the crate of that name there is unrelated), and
 # it has no [lib] section -- but it ships src/lib.rs, which cargo auto-detects.
-# Pinned by rev so builds are reproducible; `cargo vendor` can lock it offline
-# if the dependency on GitHub ever becomes a problem.
-sparrow = { git = "https://github.com/JeroenGar/sparrow", rev = "6f7b9d353c2b2a4fc68454590a2e8e83475c12ef" }
+#
+# VENDORED, not a git dependency: sheet nesting needs locked items and a
+# movables-only width objective, neither of which upstream can express. The
+# snapshot, its pinned rev and every patch are recorded in
+# ../vendor/sparrow/UPSTREAM.md.
+sparrow = { path = "../vendor/sparrow" }
 jagua-rs = { version = "=1.1.0", features = ["spp"] }
 serde_json = "1.0"
 # sparrow narrates its own search through `log` -- every shrink, every failed

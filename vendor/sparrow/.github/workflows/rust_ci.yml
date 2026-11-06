@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - '**.rs'
+      - '**.toml'
+      - '**.yml'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - '**.rs'
+      - '**.toml'
+      - '**.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tests:
+    name: Run tests (no SIMD)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all-targets
+
+  tests-simd:
+    name: Run tests (SIMD)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo test --all-targets --features=simd
+  wasm:
+    name: Compile to WASM target
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo build --target wasm32-unknown-unknown --lib
+
