@@ -65,11 +65,21 @@ use jagua_rs::probs::spp::io::ext_repr::{ExtItem, ExtSPInstance};
 /// writes, so a placement can be told apart from a part's by its id alone.
 pub const SEPARATOR_ITEM_ID: u64 = 1 << 40;
 
-/// Slack when deciding whether a part fits within a sheet's span, in input units
-/// (millimetres). A part packed flush against a separator lands exactly on the
-/// boundary, so f32 noise in the search can put it a fraction of a micron past
-/// it; 1 nm is far below anything a cutter can resolve and far above that noise.
-const FIT_TOLERANCE: f32 = 1e-6;
+/// Slack when deciding which sheet a part is on, in input units (millimetres).
+///
+/// This is load-bearing, not hygiene. A part packed flush against a separator
+/// lands EXACTLY on a sheet boundary -- that is the invariant working -- so the
+/// comparison is always against a coincidence, and f32 noise from the search
+/// falls on whichever side it likes. Both ends need the slack: a hair under the
+/// boundary would otherwise put the part on the sheet before, where its far end
+/// then looks like an overrun, and a hair over would read as a straddle.
+///
+/// Relative, because the strip grows with the sheet count and f32's spacing
+/// grows with it: at 10 m the slack works out around ten microns, which is well
+/// inside a laser's kerf and so cannot turn a real overrun into a false pass.
+fn fit_tolerance(x: f32) -> f32 {
+    f32::max(1e-4, x.abs() * 1e-6)
+}
 
 /// How the caller wants the sheets laid out.
 #[derive(Debug, Clone, Copy)]
@@ -124,20 +134,27 @@ pub struct SheetStrip {
 
 impl SheetStrip {
     /// Describes `spec` as a strip, adding the separator item to `ext` if more
-    /// than one sheet was asked for. Returns nothing when there are no sheets to
-    /// speak of, which leaves the solve exactly as it was before sheets existed.
+    /// than one sheet was asked for.
+    ///
+    /// `Ok(None)` means no sheets were asked for, which leaves the solve exactly
+    /// as it was before sheets existed. `Err` means sheets were asked for and
+    /// cannot be had -- reported rather than quietly falling back to the
+    /// unbounded strip, because a caller who asked to nest onto sheets and got
+    /// a strip instead has been given the wrong answer, not a lesser one.
     ///
     /// The separator is ONE item with demand `count - 1`, not `count - 1` items:
     /// every gap is the same rectangle, and a locked item index locks all of its
     /// placements, so one item is both cheaper and exactly as expressive.
-    pub fn prepare(ext: &mut ExtSPInstance, spec: &SheetSpec) -> Option<Self> {
+    pub fn prepare(ext: &mut ExtSPInstance, spec: &SheetSpec) -> Result<Option<Self>, String> {
         if spec.max_sheets < 1 || spec.width <= 0.0 {
-            return None;
+            return Ok(None);
         }
         let separation = ext.min_item_separation.max(0.0);
         let height = ext.strip_height;
         if height <= 2.0 * separation {
-            return None;
+            return Err(format!(
+                "a {height} sheet leaves no usable height at {separation} part spacing"
+            ));
         }
         let gap = spec.resolved_gap(separation);
 
@@ -150,7 +167,7 @@ impl SheetStrip {
             separator_idx: None,
         };
         if spec.max_sheets < 2 {
-            return Some(strip);
+            return Ok(Some(strip));
         }
         strip.separator_idx = Some(usize::MAX); // resolved after import
 
@@ -178,7 +195,7 @@ impl SheetStrip {
             demand: u64::from(spec.max_sheets - 1),
         });
 
-        Some(strip)
+        Ok(Some(strip))
     }
 
     /// Resolves the separator's instance index, which only exists once the
@@ -276,15 +293,23 @@ impl SheetStrip {
     ///
     /// Division, because of the invariant in this module's header: sheet `k` is
     /// exactly `[k * pitch, k * pitch + W]` once shapes are inflated by `s/2`.
+    /// Both comparisons carry [`fit_tolerance`], because a part flush against a
+    /// separator sits exactly on a boundary and the test is therefore always
+    /// against a coincidence.
     pub fn classify(&self, bbox: Rect) -> Placed {
-        if bbox.x_min < 0.0 {
+        let tol = fit_tolerance(bbox.x_max);
+        if bbox.x_min < -tol {
             return Placed::Overflow;
         }
-        let k = (bbox.x_min / self.pitch) as u32;
+        // Nudged before the division: a part flush to a separator's right face
+        // can land a hair BELOW the boundary, which would otherwise name the
+        // sheet before it and then read the part as overrunning that sheet.
+        let k = ((bbox.x_min + tol) / self.pitch).max(0.0) as u32;
         if k >= self.count {
             return Placed::Overflow;
         }
-        match bbox.x_max <= self.pitch * k as f32 + self.width + FIT_TOLERANCE {
+        let left = self.pitch * k as f32;
+        match bbox.x_min >= left - tol && bbox.x_max <= left + self.width + tol {
             true => Placed::OnSheet(k),
             // Either reaching into the gap past the last sheet, or -- if a
             // separator were ever missing -- straddling a boundary.
@@ -322,7 +347,9 @@ mod tests {
         };
         let mut one = spec();
         one.max_sheets = 1;
-        let strip = SheetStrip::prepare(&mut ext, &one).expect("one sheet is still a sheet");
+        let strip = SheetStrip::prepare(&mut ext, &one)
+            .expect("a lone sheet is possible")
+            .expect("one sheet is still a sheet");
         assert!(!strip.has_separators(), "a lone sheet has no boundary to defend");
         assert!(ext.items.is_empty(), "and so adds nothing to the instance");
     }
@@ -335,7 +362,9 @@ mod tests {
             items: vec![],
             strip_height: 50.0,
         };
-        let strip = SheetStrip::prepare(&mut ext, &spec()).expect("three sheets");
+        let strip = SheetStrip::prepare(&mut ext, &spec())
+            .expect("three sheets are possible")
+            .expect("three sheets");
         assert!(strip.has_separators());
         assert_eq!(ext.items.len(), 1);
         assert_eq!(ext.items[0].demand, 2);
@@ -357,6 +386,35 @@ mod tests {
         let s = strip();
         assert_eq!(s.classify(Rect::try_new(50.0, 1.0, 100.0, 49.0).unwrap()), Placed::OnSheet(0));
         assert_eq!(s.classify(Rect::try_new(50.0, 1.0, 100.5, 49.0).unwrap()), Placed::Overflow);
+    }
+
+    /// The same coincidence from the other side, and the one that actually bit:
+    /// a part flush against a separator's RIGHT face sits exactly on the start of
+    /// the next sheet, so f32 noise can drop it a hair below. Taking the sheet
+    /// index from an un-nudged division then names the sheet BEFORE it, whose
+    /// right edge the part is of course nowhere near -- and a perfectly good
+    /// placement is reported as overflow.
+    #[test]
+    fn a_hair_short_of_a_boundary_is_on_the_sheet_that_starts_there() {
+        let s = strip();
+        let eps = 1e-5;
+        assert_eq!(
+            s.classify(Rect::try_new(110.0 - eps, 1.0, 150.0, 49.0).unwrap()),
+            Placed::OnSheet(1)
+        );
+        assert_eq!(
+            s.classify(Rect::try_new(220.0 - eps, 1.0, 260.0, 49.0).unwrap()),
+            Placed::OnSheet(2)
+        );
+    }
+
+    /// The slack must not be so generous that it swallows a real overrun. A
+    /// tenth of a millimetre past the edge is a part hanging off the sheet.
+    #[test]
+    fn the_slack_does_not_excuse_a_real_overrun() {
+        let s = strip();
+        assert_eq!(s.classify(Rect::try_new(50.0, 1.0, 100.1, 49.0).unwrap()), Placed::Overflow);
+        assert_eq!(s.classify(Rect::try_new(109.9, 1.0, 150.0, 49.0).unwrap()), Placed::Overflow);
     }
 
     #[test]

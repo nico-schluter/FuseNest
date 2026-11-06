@@ -331,6 +331,30 @@ fn objective_width(
         .fold(0.0_f32, f32::max)
 }
 
+/// Density against the width the objective is minimising, counting part area
+/// only. `SPSolution::density` would charge the separators' own area to the
+/// layout and measure it against the whole physical strip -- for a sheet nest
+/// that is neither the numerator nor the denominator anyone means.
+fn objective_density(
+    sol: &jagua_rs::probs::spp::entities::SPSolution,
+    sheets: Option<&SheetStrip>,
+) -> f32 {
+    let Some(s) = sheets else {
+        return sol.density();
+    };
+    let part_area: f32 = sol
+        .layout_snapshot()
+        .placed_items()
+        .values()
+        .filter(|pi| !s.is_separator(pi.item().idx()))
+        .map(|pi| pi.item().area())
+        .sum();
+    match objective_width(sol, sheets) * s.height {
+        a if a > 0.0 => part_area / a,
+        _ => 0.0,
+    }
+}
+
 /// Replaces the published layout with this solution's.
 ///
 /// Only ever called with a FEASIBLE solution. sparrow also reports solutions
@@ -343,26 +367,7 @@ fn publish_snapshot(
 ) {
     let (placements, sheets_used, overflow) = sheeted_placements(sol, sheets);
     let width = objective_width(sol, sheets);
-    // Density against the width the objective is minimising, counting part area
-    // only: `SPSolution::density` would charge the separators' area to the layout
-    // and measure it against the whole physical strip, which for a sheet nest is
-    // neither the numerator nor the denominator anyone means.
-    let density = match sheets {
-        None => sol.density(),
-        Some(s) => {
-            let part_area: f32 = sol
-                .layout_snapshot()
-                .placed_items()
-                .values()
-                .filter(|pi| !s.is_separator(pi.item().idx()))
-                .map(|pi| pi.item().area())
-                .sum();
-            match width * s.height {
-                a if a > 0.0 => part_area / a,
-                _ => 0.0,
-            }
-        }
-    };
+    let density = objective_density(sol, sheets);
 
     if let Ok(mut g) = SNAPSHOT.lock() {
         *g = Snapshot {
@@ -391,7 +396,8 @@ impl SolutionListener for FfiListener {
     fn report(&mut self, r: ReportType, s: &jagua_rs::probs::spp::entities::SPSolution) {
         let sheets = self.sheets.as_ref();
         let width = objective_width(s, sheets);
-        set_f32(&DENSITY_BITS, s.density());
+        let density = objective_density(s, sheets);
+        set_f32(&DENSITY_BITS, density);
         set_f32(&STRIP_WIDTH_BITS, width);
         // Which ReportType a solution arrives under is the difference between a
         // layout that can be previewed and one with items still overlapping, so
@@ -400,7 +406,7 @@ impl SolutionListener for FfiListener {
             "[SOL] {:?}: width {:.3}, density {:.2}%",
             r,
             width,
-            s.density() * 100.0
+            density * 100.0
         ));
 
         // This is what makes early accept possible: a feasible report is the
@@ -559,7 +565,10 @@ fn run_nest(
     // Sheet nesting adds ONE item to the instance -- the separator -- before
     // import, and locks it afterwards. Everything else about the solve is the
     // same strip packing as always; see `sheets.rs` for why that is enough.
-    let sheets = spec.and_then(|spec| SheetStrip::prepare(&mut ext, &spec));
+    let sheets = match spec {
+        Some(spec) => SheetStrip::prepare(&mut ext, &spec)?,
+        None => None,
+    };
 
     let importer = Importer::new(
         cfg.cde_config,

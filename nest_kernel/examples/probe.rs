@@ -108,7 +108,7 @@ fn main() {
     cfg.cmpr_cfg.time_limit = total.mul_f32(0.25);
     cfg.cmpr_cfg.shrink_decay = ShrinkDecayStrategy::FailureBased(0.5);
 
-    let sheets = spec.and_then(|spec| SheetStrip::prepare(&mut ext, &spec));
+    let sheets = spec.and_then(|spec| SheetStrip::prepare(&mut ext, &spec).expect("sheet spec"));
     if let Some(s) = &sheets {
         eprintln!(
             "--- sheets: {} x {:.3} wide, pitch {:.3}, span {:.3} ---",
