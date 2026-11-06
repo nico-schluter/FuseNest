@@ -176,8 +176,12 @@ fn main() {
     )
     .expect("optimize");
 
-    let ext_sol = jagua_rs::probs::spp::io::export(&solution, *sparrow::EPOCH);
-    println!("{}", serde_json::to_string(&ext_sol).unwrap());
+    // The same envelope the add-in writes, so a probe run can be fed straight to
+    // tools/plot_nest.py.
+    println!(
+        "{}",
+        nest_kernel::solution_json(&solution, sheets.as_ref()).expect("solution JSON")
+    );
 
     match &sheets {
         None => eprintln!(

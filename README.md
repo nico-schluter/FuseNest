@@ -18,7 +18,9 @@ src/                  pure source; nothing in here ships
   solver.{h,cpp}        runs the kernel off-thread, returns via CustomEvent
   nest_kernel.h         hand-written C ABI for the Rust side
   log.{h,cpp}           file logging (a GUI process has no stdout)
-nest_kernel/          Rust staticlib wrapping sparrow, pinned by git rev
+nest_kernel/          Rust staticlib wrapping sparrow
+  src/sheets.rs         sheet nesting on top of a strip packer
+vendor/sparrow/       our fork of sparrow; UPSTREAM.md records every patch
 packaging/            the non-code parts of the deliverable
   FuseNest.manifest     source of truth; staged into dist/ by CMake
   AddInIcon.svg
@@ -33,8 +35,10 @@ CMakePresets.json     dev (native, optimised) | dist (universal)
 `nest_kernel` is a Rust staticlib linked straight into the add-in, wrapping
 [sparrow](https://github.com/JeroenGar/sparrow) (MIT) on
 [jagua-rs](https://github.com/JeroenGar/jagua-rs) (MPL-2.0). sparrow is not
-published on crates.io, so it is a **git dependency pinned by rev**; `cargo
-vendor` will lock it offline if that ever matters.
+published on crates.io and has no tags, so it is **vendored** in
+`vendor/sparrow/` -- a snapshot of one `main` commit, with the pin and every
+patch recorded in `vendor/sparrow/UPSTREAM.md`. jagua-rs stays an unmodified
+crates.io dependency, which keeps the whole fork MIT.
 
 The ABI is JSON in, JSON out, because that is sparrow's own native boundary --
 no polygon is hand-marshalled. A solve runs on a worker thread so Fusion stays
@@ -45,6 +49,23 @@ can poll.
 **A jagua-rs item must be one simple polygon**, so holes are captured during
 extraction but dropped when building solver input. Items with holes are a hard
 import error upstream, not a warning.
+
+## Sheets
+
+sparrow solves an infinite strip; FuseNest nests onto sheets. The bridge is to
+lay the sheets end to end into one strip and drop an immovable rectangle -- a
+**separator** -- into each inter-sheet gap, so no part can straddle a boundary.
+That needs two things upstream sparrow cannot express, which is why the fork
+exists: items that never move, and a width objective that ignores them.
+
+Sheet count is an **output**, the way strip width always was. The dialog's Max
+sheets is a ceiling; the result says how many sheets the nest needed, and parts
+that fit nowhere are reported as overflow and left where they are rather than
+moved into the open space past the last sheet. A sheet width of zero keeps the
+unbounded strip, which is still what you want for coil stock.
+
+`nest_kernel/src/sheets.rs` has the geometry, including why a separator whose
+ring is exactly the gap rectangle makes sheet assignment a division.
 
 ## The deliverable
 
@@ -104,7 +125,22 @@ python3 -I tools/plot_nest.py fusenest_instance.json   # writes nest.svg
 ```
 
 It reconstructs each placement and verifies the geometry -- no overlaps,
-everything inside the strip, separation honoured -- before drawing anything.
+everything inside the strip, separation honoured, and every part wholly within
+one sheet -- before drawing anything. That last one is the invariant sheet
+nesting rests on, and the only check that would catch a separator in the wrong
+place, so it is deliberately done from the geometry rather than from anything
+the solver says about itself.
+
+To solve without Fusion at all, including onto sheets:
+
+```bash
+cd nest_kernel
+cargo run --release --example probe -- ../fusenest_instance.json 8000 50x4+10 > sol.json
+```
+
+`50x4+10` is four sheets 50 mm wide with a 10 mm gap; drop the argument for the
+plain strip. The probe prints what jagua-rs made of each item on import, which
+is the other thing that cannot be asked from inside Fusion.
 
 ## Things that will bite
 

@@ -603,8 +603,42 @@ fn run_nest(
     // The listener already published this exact solution as a snapshot when
     // optimize() reported it as ReportType::Final, so there is nothing to store
     // here -- only the JSON to hand back.
-    let ext_sol = jagua_rs::probs::spp::io::export(&solution, *sparrow::EPOCH);
-    serde_json::to_string(&ext_sol).map_err(|e| format!("output JSON: {e}"))
+    solution_json(&solution, sheets.as_ref())
+}
+
+/// A solution as JSON: sparrow's own `ExtSPSolution`, plus a `sheets` object
+/// when the solve had sheets.
+///
+/// The extra object is not decoration. A sheet solve's layout contains separator
+/// placements whose item the INPUT instance does not define -- the kernel adds it
+/// after parsing -- so without the geometry written alongside, the solution file
+/// refers to a shape nothing else can reconstruct. With it the file stands on its
+/// own, which is the whole point of there being a file: `tools/plot_nest.py`
+/// rebuilds the separators and the sheet boundaries from this and can then check
+/// the invariant that matters from OUTSIDE the solver, that no part crosses a
+/// boundary.
+pub fn solution_json(
+    solution: &jagua_rs::probs::spp::entities::SPSolution,
+    sheets: Option<&SheetStrip>,
+) -> Result<String, String> {
+    let ext_sol = jagua_rs::probs::spp::io::export(solution, *sparrow::EPOCH);
+    let mut doc = serde_json::to_value(&ext_sol).map_err(|e| format!("output JSON: {e}"))?;
+
+    if let Some(s) = sheets {
+        let (_, sheets_used, overflow) = sheeted_placements(solution, Some(s));
+        doc["sheets"] = serde_json::json!({
+            "separator_item_id": sheets::SEPARATOR_ITEM_ID,
+            "width": s.width,
+            "gap": s.pitch - s.width,
+            "pitch": s.pitch,
+            "height": s.height,
+            "separation": s.separation,
+            "allocated": s.count,
+            "used": sheets_used,
+            "overflow": overflow,
+        });
+    }
+    serde_json::to_string(&doc).map_err(|e| format!("output JSON: {e}"))
 }
 
 
