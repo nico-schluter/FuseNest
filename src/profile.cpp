@@ -121,6 +121,48 @@ void collectBodies(const Ptr<Base>& sel, const std::string& prefix,
     }
 }
 
+/// Plane and manager every projection needs. Both callers fail the same way
+/// when either is missing, so the check lives with the lookup.
+struct ProjectionContext {
+    Ptr<Plane> plane;
+    Ptr<TemporaryBRepManager> mgr;
+    bool ok() const { return plane && mgr; }
+};
+
+ProjectionContext projectionContext(const Ptr<Application>& app) {
+    ProjectionContext ctx;
+    Ptr<Design> design = app ? app->activeProduct()->cast<Design>() : nullptr;
+    Ptr<Component> root = design ? design->rootComponent() : nullptr;
+    Ptr<ConstructionPlane> xy = root ? root->xYConstructionPlane() : nullptr;
+    ctx.plane = xy ? xy->geometry() : nullptr;
+    ctx.mgr = TemporaryBRepManager::get();
+    return ctx;
+}
+
+/// The one-body-one-item rule. `faceCount` comes from the projected outline.
+///
+/// Both the live check and extraction decide here, so the dialog and the
+/// refusal can never disagree about what is nestable, and the wording the user
+/// reads is written once.
+bool nestableAsOneItem(const Ptr<BRepBody>& body, size_t faceCount, std::string& reason) {
+    if (faceCount <= 1) return true;
+
+    // A connected solid reaches here too: its silhouette only has to pinch to a
+    // point for the projection to come back as faces meeting at that vertex. So
+    // ask the body how many lumps it has instead of inferring disconnection
+    // from the face count, which is what an earlier comment here got wrong.
+    Ptr<BRepLumps> lumps = body ? body->lumps() : nullptr;
+    const size_t lumpCount = lumps ? lumps->count() : 0;
+
+    std::ostringstream os;
+    os << "projects to " << faceCount << " separate regions "
+       << (lumpCount > 1 ? "(the body is in " + std::to_string(lumpCount) + " lumps)"
+                         : "(the silhouette pinches to a point)")
+       << " and cannot be nested as one rigid body";
+    reason = os.str();
+    return false;
+}
+
 }  // namespace
 
 ExtractResult extractProfiles(const Ptr<Application>& app,
@@ -128,13 +170,8 @@ ExtractResult extractProfiles(const Ptr<Application>& app,
                               const ExtractOptions& options) {
     ExtractResult result;
 
-    Ptr<Design> design = app ? app->activeProduct()->cast<Design>() : nullptr;
-    Ptr<Component> root = design ? design->rootComponent() : nullptr;
-    Ptr<ConstructionPlane> xy = root ? root->xYConstructionPlane() : nullptr;
-    Ptr<Plane> plane = xy ? xy->geometry() : nullptr;
-    Ptr<TemporaryBRepManager> mgr = TemporaryBRepManager::get();
-
-    if (!plane || !mgr) {
+    const ProjectionContext ctx = projectionContext(app);
+    if (!ctx.ok()) {
         result.warnings.push_back("no active design, or the temporary BRep manager is unavailable");
         return result;
     }
@@ -150,7 +187,8 @@ ExtractResult extractProfiles(const Ptr<Application>& app,
 
     for (const auto& [name, body] : bodies) {
         bool approximated = false;
-        Ptr<BRepBody> outline = mgr->createProjectedBodyOutline(body, plane, toleranceCm, approximated);
+        Ptr<BRepBody> outline =
+            ctx.mgr->createProjectedBodyOutline(body, ctx.plane, toleranceCm, approximated);
         if (!outline) {
             std::string err;
             app->getLastError(&err);
@@ -164,64 +202,95 @@ ExtractResult extractProfiles(const Ptr<Application>& app,
             result.warnings.push_back(name + ": outline has no faces");
             continue;
         }
-        if (faceCount > 1) {
-            // Only reachable for a multi-lump body: the projection of a single
-            // connected solid is always connected. Split rather than fail, and
-            // say so.
-            std::ostringstream os;
-            os << name << ": projects to " << faceCount
-               << " disconnected regions (multi-lump body) -- split into that many profiles";
-            result.warnings.push_back(os.str());
+        // Refuse the body rather than split it. Splitting was the old behaviour
+        // and it is silently wrong: each region nests as its own item, then
+        // write-back issues one move feature per placement against the SAME
+        // body, and they compose. Two placements at opposite rotations cancel to
+        // no rotation and a fraction of the intended travel, so the part reads
+        // as one that simply refused to move -- with a success report next to it.
+        std::string reason;
+        if (!nestableAsOneItem(body, faceCount, reason)) {
+            result.blockers.push_back(BodyIssue{name, reason});
+            continue;
         }
 
-        for (size_t f = 0; f < faceCount; ++f) {
-            Ptr<BRepFace> face = faces->item(f);
-            Ptr<BRepLoops> loops = face ? face->loops() : nullptr;
-            if (!loops || loops->count() == 0) {
-                result.warnings.push_back(name + ": face has no loops");
-                continue;
-            }
-
-            Profile profile;
-            profile.name = faceCount > 1 ? name + " [" + std::to_string(f + 1) + "]" : name;
-            profile.source = body;
-            profile.silhouetteApproximated = approximated;
-            profile.areaMm2 = face->area() * kCm2ToMm2;
-
-            bool ok = true;
-            for (size_t l = 0; l < loops->count(); ++l) {
-                Ptr<BRepLoop> loop = loops->item(l);
-                std::vector<Point2> ring;
-                std::string error;
-                if (!ringFromLoop(loop, toleranceCm, epsMm, ring, error)) {
-                    result.warnings.push_back(profile.name + ": " + error);
-                    ok = false;
-                    break;
-                }
-                // isOuter() tells us outright which ring is the boundary -- no
-                // containment test or area-sign heuristic needed.
-                if (loop->isOuter())
-                    profile.outer = std::move(ring);
-                else
-                    profile.holes.push_back(std::move(ring));
-            }
-
-            if (!ok) continue;
-            if (profile.outer.empty()) {
-                result.warnings.push_back(profile.name + ": no outer loop found");
-                continue;
-            }
-
-            result.holesDropped += static_cast<int>(profile.holes.size());
-            logLine("profile " + profile.name + ": " + std::to_string(profile.outer.size()) +
-                    " outer points, " + std::to_string(profile.holes.size()) + " holes, " +
-                    std::to_string(profile.areaMm2) + " mm2" +
-                    (profile.silhouetteApproximated ? ", silhouette approximated" : ""));
-            result.profiles.push_back(std::move(profile));
+        // One face, guaranteed by the refusal above: a body that projected to
+        // more than one region never reaches here.
+        Ptr<BRepFace> face = faces->item(0);
+        Ptr<BRepLoops> loops = face ? face->loops() : nullptr;
+        if (!loops || loops->count() == 0) {
+            result.warnings.push_back(name + ": face has no loops");
+            continue;
         }
+
+        Profile profile;
+        profile.name = name;
+        profile.source = body;
+        profile.silhouetteApproximated = approximated;
+        profile.areaMm2 = face->area() * kCm2ToMm2;
+
+        bool ok = true;
+        for (size_t l = 0; l < loops->count(); ++l) {
+            Ptr<BRepLoop> loop = loops->item(l);
+            std::vector<Point2> ring;
+            std::string error;
+            if (!ringFromLoop(loop, toleranceCm, epsMm, ring, error)) {
+                result.warnings.push_back(profile.name + ": " + error);
+                ok = false;
+                break;
+            }
+            // isOuter() tells us outright which ring is the boundary -- no
+            // containment test or area-sign heuristic needed.
+            if (loop->isOuter())
+                profile.outer = std::move(ring);
+            else
+                profile.holes.push_back(std::move(ring));
+        }
+
+        if (!ok) continue;
+        if (profile.outer.empty()) {
+            result.warnings.push_back(profile.name + ": no outer loop found");
+            continue;
+        }
+
+        result.holesDropped += static_cast<int>(profile.holes.size());
+        logLine("profile " + profile.name + ": " + std::to_string(profile.outer.size()) +
+                " outer points, " + std::to_string(profile.holes.size()) + " holes, " +
+                std::to_string(profile.areaMm2) + " mm2" +
+                (profile.silhouetteApproximated ? ", silhouette approximated" : ""));
+        result.profiles.push_back(std::move(profile));
     }
 
     return result;
+}
+
+std::vector<BodyIssue> validateBodies(const Ptr<Application>& app,
+                                      const std::vector<Ptr<Base>>& selections,
+                                      const ExtractOptions& options) {
+    std::vector<BodyIssue> issues;
+
+    const ProjectionContext ctx = projectionContext(app);
+    if (!ctx.ok()) return issues;  // nothing to say; extraction reports it
+
+    std::vector<std::pair<std::string, Ptr<BRepBody>>> bodies;
+    for (const auto& sel : selections) collectBodies(sel, "", bodies);
+
+    const double toleranceCm = options.toleranceMm / kCmToMm;
+    for (const auto& [name, body] : bodies) {
+        bool approximated = false;
+        Ptr<BRepBody> outline =
+            ctx.mgr->createProjectedBodyOutline(body, ctx.plane, toleranceCm, approximated);
+        // A projection that fails outright is left to extraction, which has the
+        // error text and a warning channel for it. Saying nothing here keeps
+        // this list to what it promises: bodies that are definitely unnestable.
+        if (!outline) continue;
+
+        Ptr<BRepFaces> faces = outline->faces();
+        std::string reason;
+        if (!nestableAsOneItem(body, faces ? faces->count() : 1, reason))
+            issues.push_back(BodyIssue{name, reason});
+    }
+    return issues;
 }
 
 }  // namespace fusenest

@@ -47,6 +47,7 @@ const char* kInWorkers = "fnWorkers";
 const char* kInVerbose = "fnVerbose";
 const char* kInStatus = "fnStatus";
 const char* kInJob = "fnJob";
+const char* kInIssues = "fnIssues";
 
 Ptr<CommandDefinition> g_cmdDef;
 Ptr<CommandDefinition> g_resultDef;
@@ -54,6 +55,12 @@ Ptr<CommandDefinition> g_resultDef;
 /// The profiles the last solve was built from. Placement item_ids index into
 /// this, so it has to outlive the command that produced it.
 std::vector<Profile> g_lastProfiles;
+
+/// Bodies the setup dialog has judged unnestable, refreshed whenever the
+/// selection changes. Held rather than recomputed because validateInputs fires
+/// far more often than the selection changes, and each recompute projects every
+/// selected body.
+std::vector<BodyIssue> g_setupIssues;
 
 /// What command 1 found, so the result dialog can show it instead of the
 /// message box that used to carry it.
@@ -796,6 +803,24 @@ class ExecuteHandler : public CommandEventHandler {
             totalPoints += p.outer.size();
         }
 
+        if (!extracted.blockers.empty()) {
+            // A backstop, not the user-facing path: validateInputs greys out OK
+            // while any body is unnestable, so reaching here means the live check
+            // and extraction disagreed. Refusing is still right -- splitting the
+            // body is what produced silently composed move features -- but it is
+            // a bug on our side, so it says so and names what it found.
+            std::ostringstream os;
+            os << "Cannot nest:\n";
+            for (const auto& b : extracted.blockers) {
+                os << "\n  " << b.name << ": " << b.reason;
+                logLine("blocker missed by the setup check: " + b.name + ": " + b.reason);
+            }
+            os << "\n\nThe dialog should have caught this before you pressed Nest."
+               << "\n\nLog: " << logPath();
+            if (ui) ui->messageBox(os.str(), "FuseNest");
+            return;
+        }
+
         g_lastProfiles = extracted.profiles;
         SolverInput input;
         {
@@ -964,11 +989,84 @@ void restoreSetupSelections(const Ptr<CommandInputs>& inputs) {
                            "FuseNest");
 }
 
+/// The red line under the inputs: names only, one sentence.
+///
+/// The command pane is narrow enough to fit three or four words per line and
+/// scrolls after about four lines, so there is no room to explain anything
+/// here. The names are what the user acts on -- deselect or repair one of them
+/// -- and the reason for each is in the log, written by refreshSetupIssues.
+/// Beyond three names the list is abbreviated rather than wrapped: a paragraph
+/// of names in a scrolling box is less readable than a count.
+std::string issuesHtml(const std::vector<BodyIssue>& issues) {
+    if (issues.empty()) return "";
+
+    const size_t shown = issues.size() <= 3 ? issues.size() : 2;
+
+    std::ostringstream os;
+    os << R"(<div style="color:#c0392b">)";
+    for (size_t i = 0; i < shown; ++i) {
+        if (i) os << (i + 1 == shown && shown == issues.size() ? " and " : ", ");
+        os << "<b>" << issues[i].name << "</b>";
+    }
+    if (shown < issues.size()) os << " and " << (issues.size() - shown) << " more";
+    os << " produced invalid geometry.</div>";
+    return os.str();
+}
+
+/// Reruns the check and shows or hides the textbox. Called on every selection
+/// change and once on activate, since selections restored in code do not fire
+/// inputChanged.
+void refreshSetupIssues(const Ptr<CommandInputs>& inputs) {
+    if (!inputs) return;
+
+    const NestRequest req = readInputs(inputs);
+
+    // Measured on every call and logged, because this projects every selected
+    // body on the main thread while the user is clicking. timingReport() cannot
+    // carry it -- execute calls timingReset() before anything is reported -- so
+    // the cost of the live check only exists if it is written down here.
+    const auto t0 = std::chrono::steady_clock::now();
+    g_setupIssues = validateBodies(Application::get(), req.parts);
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    logLine("setup check: " + std::to_string(req.parts.size()) + " selections in " +
+            std::to_string(static_cast<long>(ms)) + " ms, " +
+            std::to_string(g_setupIssues.size()) + " rejected");
+
+    Ptr<TextBoxCommandInput> tb = inputs->itemById(kInIssues);
+    if (!tb) return;
+    const bool any = !g_setupIssues.empty();
+    // Text first, then visibility: writing into a hidden input is cheap, and
+    // showing one that still holds the previous message flashes it.
+    if (any) tb->formattedText(issuesHtml(g_setupIssues));
+    tb->isVisible(any);
+
+    if (any)
+        for (const auto& issue : g_setupIssues)
+            logLine("setup rejects " + issue.name + ": " + issue.reason);
+}
+
 class ActivateHandler : public CommandEventHandler {
   public:
     void notify(const Ptr<CommandEventArgs>& args) override {
         Ptr<Command> cmd = args ? args->command() : nullptr;
-        restoreSetupSelections(cmd ? cmd->commandInputs() : nullptr);
+        Ptr<CommandInputs> inputs = cmd ? cmd->commandInputs() : nullptr;
+        restoreSetupSelections(inputs);
+        // Those selections were added in code, which fires no inputChanged, so
+        // a restored job carrying a bad body would otherwise look fine until OK.
+        refreshSetupIssues(inputs);
+    }
+};
+
+class InputChangedHandler : public InputChangedEventHandler {
+  public:
+    void notify(const Ptr<InputChangedEventArgs>& args) override {
+        if (!args) return;
+        Ptr<CommandInput> changed = args->input();
+        // Only the selection can change the answer, and the check projects every
+        // selected body -- so spinners and the unit fields must not trigger it.
+        if (!changed || changed->id() != kInParts) return;
+        refreshSetupIssues(args->inputs());
     }
 };
 
@@ -978,8 +1076,9 @@ class ValidateHandler : public ValidateInputsEventHandler {
         if (!args) return;
         const NestRequest req = readInputs(args->inputs());
         // Greys out OK rather than failing later with a confusing message.
+        // g_setupIssues is read, not recomputed: this fires on every keystroke.
         args->areInputsValid(!req.parts.empty() && req.sheetHeightMm > 0.0 &&
-                             req.partSpacingMm >= 0.0);
+                             req.partSpacingMm >= 0.0 && g_setupIssues.empty());
     }
 };
 
@@ -992,6 +1091,9 @@ class CreatedHandler : public CommandCreatedEventHandler {
             return;
         }
         cmd->okButtonText("Nest");
+        // A verdict from the previous dialog must not gate this one's OK button
+        // before activate has had a chance to recompute it.
+        g_setupIssues.clear();
 
         Ptr<CommandInputs> inputs = cmd->commandInputs();
         if (!inputs) {
@@ -1033,9 +1135,21 @@ class CreatedHandler : public CommandCreatedEventHandler {
         inputs->addIntegerSpinnerCommandInput(kInWorkers, "Workers", 1, 64, 1, 4);
         inputs->addBoolValueInput(kInVerbose, "Verbose log", true, "", false);
 
+        // Last, so it reads as a footer under the inputs rather than a field,
+        // and full width because it carries a sentence, not a value. Two rows:
+        // one sentence, with room for the names to wrap once. Hidden until
+        // there is something to say; activate fills it if a restored selection
+        // already has a problem.
+        if (Ptr<TextBoxCommandInput> issues =
+                inputs->addTextBoxCommandInput(kInIssues, "", "", 2, true)) {
+            issues->isFullWidth(true);
+            issues->isVisible(false);
+        }
+
         restoreSetupValues(inputs);
 
         cmd->validateInputs()->add(&validate_);
+        cmd->inputChanged()->add(&inputChanged_);
         cmd->execute()->add(&execute_);
         cmd->destroy()->add(&destroy_);
         // Selections are restored on activate, not here: a selection input
@@ -1049,6 +1163,7 @@ class CreatedHandler : public CommandCreatedEventHandler {
     ExecuteHandler execute_;
     DestroyHandler destroy_;
     ActivateHandler activate_;
+    InputChangedHandler inputChanged_;
 };
 
 CreatedHandler g_createdHandler;
