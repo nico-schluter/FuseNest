@@ -7,7 +7,11 @@ edition = "2021"
 # staticlib: everything Rust needs is archived into one .a that the add-in
 # links directly. No second binary to ship, nothing to dlopen, and no runtime
 # dependency on Fusion's process layout.
-crate-type = ["staticlib"]
+#
+# rlib alongside it so the crate's own tests and `examples/probe.rs` can link
+# it. A staticlib cannot be depended on from Rust, and the probe is how the
+# sheet layer gets exercised without Fusion in the loop. Nothing ships it.
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 # sparrow is NOT on crates.io (the crate of that name there is unrelated), and
