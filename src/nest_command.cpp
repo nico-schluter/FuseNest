@@ -40,6 +40,8 @@ constexpr double kMmToCm = 0.1;
 // Input ids, in one place so the dialog and the execute handler cannot drift.
 const char* kInParts = "fnParts";
 const char* kInSheetHeight = "fnSheetHeight";
+const char* kInSheetWidth = "fnSheetWidth";
+const char* kInMaxSheets = "fnMaxSheets";
 const char* kInSpacing = "fnSpacing";
 const char* kInRotation = "fnRotation";
 const char* kInBudget = "fnBudget";
@@ -55,6 +57,11 @@ Ptr<CommandDefinition> g_resultDef;
 /// The profiles the last solve was built from. Placement item_ids index into
 /// this, so it has to outlive the command that produced it.
 std::vector<Profile> g_lastProfiles;
+
+/// The sheets the last solve was given, for the preview to draw. Alongside
+/// g_lastProfiles and for the same reason: the preview is rebuilt on every pass
+/// and nothing from the request survives to it otherwise.
+PreviewSheets g_sheets;
 
 /// Bodies the setup dialog has judged unnestable, refreshed whenever the
 /// selection changes. Held rather than recomputed because validateInputs fires
@@ -75,6 +82,8 @@ std::string g_jobSummary;
 struct SavedSetup {
     bool valid = false;
     double sheetHeightMm = 0.0;
+    double sheetWidthMm = 0.0;
+    int maxSheets = 1;
     double partSpacingMm = 0.0;
     int rotationIndex = 1;
     int timeBudgetSeconds = 10;
@@ -112,6 +121,15 @@ struct PendingJob {
     std::vector<Profile> profiles;
     std::string summary;
     std::size_t itemCount = 0;
+    /// The sheets to nest onto, and whether there are any. Carried as a value
+    /// plus a flag rather than a pointer, because a PendingJob outlives the
+    /// request it was built from -- it can sit queued behind a cancelled solve.
+    bool sheeted = false;
+    NkSheets sheets{};
+    /// The same sheets again, in the form the preview draws them. Its pitch is
+    /// left at zero here and filled from the snapshot at draw time, because the
+    /// kernel may have defaulted the gap and is the only thing that knows.
+    PreviewSheets previewSheets;
 };
 
 PendingJob g_pending;
@@ -252,9 +270,19 @@ std::string statusText() {
     // layout on screen. The separation count is search activity and belongs to
     // the progress side.
     if (!g_shown.empty()) {
-        os << "density " << static_cast<int>(g_shownInfo.density * 100.0) << " % &middot; width "
-           << static_cast<long>(g_shownInfo.strip_width) << " mm &middot; " << g_shown.size()
-           << " parts placed";
+        os << "density " << static_cast<int>(g_shownInfo.density * 100.0) << " % &middot; ";
+        // On sheets the sheet count IS the answer -- the width behind it is the
+        // objective the solver minimised, not a number anyone orders stock by.
+        if (g_sheets.count > 0) {
+            os << g_shownInfo.sheets_used << " of " << g_sheets.count << " sheets";
+        } else {
+            os << "width " << static_cast<long>(g_shownInfo.strip_width) << " mm";
+        }
+        os << " &middot; " << g_shown.size() << " parts placed";
+        if (g_shownInfo.overflow) {
+            os << "<br/><b>" << g_shownInfo.overflow
+               << " parts do not fit</b> &middot; raise Max sheets, or widen the sheet";
+        }
         // The ordinal is not decoration. Writing this textbox is what triggers
         // the redraw, so the string has to differ every time -- and the rounded
         // width and density can easily repeat between two layouts that differ by
@@ -314,6 +342,8 @@ void rememberSetup(const Ptr<CommandInputs>& inputs, const NestRequest& req) {
 
     g_saved = SavedSetup{};
     g_saved.sheetHeightMm = req.sheetHeightMm;
+    g_saved.sheetWidthMm = req.sheetWidthMm;
+    g_saved.maxSheets = req.maxSheets;
     g_saved.partSpacingMm = req.partSpacingMm;
     g_saved.timeBudgetSeconds = req.timeBudgetSeconds;
     g_saved.workers = req.workers;
@@ -346,6 +376,10 @@ NestRequest readInputs(const Ptr<CommandInputs>& inputs) {
     }
     if (Ptr<ValueCommandInput> v = inputs->itemById(kInSheetHeight))
         req.sheetHeightMm = v->value() * kCmToMm;
+    if (Ptr<ValueCommandInput> v = inputs->itemById(kInSheetWidth))
+        req.sheetWidthMm = v->value() * kCmToMm;
+    if (Ptr<IntegerSpinnerCommandInput> s = inputs->itemById(kInMaxSheets))
+        req.maxSheets = s->value();
     if (Ptr<ValueCommandInput> v = inputs->itemById(kInSpacing))
         req.partSpacingMm = v->value() * kCmToMm;
     if (Ptr<DropDownCommandInput> d = inputs->itemById(kInRotation))
@@ -413,7 +447,10 @@ class ResultPreviewHandler : public CommandEventHandler {
         // rather than trusting a pointer the rollback may have invalidated.
         if (!previewHasGeometry(Application::get())) {
             std::string error;
-            if (!previewBuild(Application::get(), g_lastProfiles, error)) {
+            // The pitch is the solve's, not the request's: see PreviewSheets.
+            PreviewSheets sheets = g_sheets;
+            sheets.pitchMm = g_shownInfo.sheet_pitch;
+            if (!previewBuild(Application::get(), g_lastProfiles, sheets, error)) {
                 logLine("preview build failed: " + error);
                 return;
             }
@@ -579,6 +616,7 @@ ResultCreatedHandler g_resultCreatedHandler;
 bool beginJob(const PendingJob& job, std::string& error) {
     ScopedTime _t("job.begin");
     g_lastProfiles = job.profiles;
+    g_sheets = job.previewSheets;
     g_jobSummary = job.summary;
 
     g_shown.clear();
@@ -589,11 +627,16 @@ bool beginJob(const PendingJob& job, std::string& error) {
     g_solveFinished = false;
 
     solverSetLogLevel(job.verboseLevel);
-    if (!solverStart(job.instanceJson, job.budgetSeconds, job.workers, error)) return false;
+    if (!solverStart(job.instanceJson, job.budgetSeconds, job.workers,
+                     job.sheeted ? &job.sheets : nullptr, error))
+        return false;
 
     logLine("solve started: " + std::to_string(job.itemCount) + " items, " +
             std::to_string(job.workers) + " workers, " + std::to_string(job.budgetSeconds) +
-            " s ceiling");
+            " s ceiling, " +
+            (job.sheeted ? std::to_string(job.sheets.max_sheets) + " sheets of " +
+                               std::to_string(static_cast<long>(job.sheets.width)) + " mm"
+                         : std::string("unbounded strip")));
     return true;
 }
 
@@ -870,6 +913,22 @@ class ExecuteHandler : public CommandEventHandler {
         pending.profiles = extracted.profiles;
         pending.summary = g_jobSummary;
         pending.itemCount = input.itemCount;
+        // A sheet width of zero is the unbounded strip, so there is nothing to
+        // hand the kernel and the whole sheet path stays out of the way.
+        pending.sheeted = req.sheetWidthMm > 0.0;
+        pending.previewSheets = PreviewSheets{
+            req.sheetWidthMm,
+            req.sheetHeightMm,
+            0.0,
+            pending.sheeted ? req.maxSheets : 0,
+        };
+        pending.sheets = NkSheets{
+            static_cast<float>(req.sheetWidthMm),
+            // Gap zero asks the kernel for its default, which is the only place
+            // that knows the part spacing it has to clear.
+            0.0f,
+            static_cast<std::uint32_t>(req.maxSheets > 0 ? req.maxSheets : 1),
+        };
 
         logLine(std::string("engine busy when the job was ready: ") +
                 (solverBusy() ? "yes, queueing" : "no, starting now"));
@@ -932,6 +991,10 @@ void restoreSetupValues(const Ptr<CommandInputs>& inputs) {
 
     if (Ptr<ValueCommandInput> v = inputs->itemById(kInSheetHeight))
         v->value(g_saved.sheetHeightMm * kMmToCm);
+    if (Ptr<ValueCommandInput> v = inputs->itemById(kInSheetWidth))
+        v->value(g_saved.sheetWidthMm * kMmToCm);
+    if (Ptr<IntegerSpinnerCommandInput> sp = inputs->itemById(kInMaxSheets))
+        sp->value(g_saved.maxSheets);
     if (Ptr<ValueCommandInput> v = inputs->itemById(kInSpacing))
         v->value(g_saved.partSpacingMm * kMmToCm);
     if (Ptr<DropDownCommandInput> d = inputs->itemById(kInRotation))
@@ -1078,6 +1141,7 @@ class ValidateHandler : public ValidateInputsEventHandler {
         // Greys out OK rather than failing later with a confusing message.
         // g_setupIssues is read, not recomputed: this fires on every keystroke.
         args->areInputsValid(!req.parts.empty() && req.sheetHeightMm > 0.0 &&
+                             req.sheetWidthMm >= 0.0 && req.maxSheets >= 1 &&
                              req.partSpacingMm >= 0.0 && g_setupIssues.empty());
     }
 };
@@ -1122,6 +1186,21 @@ class CreatedHandler : public CommandCreatedEventHandler {
         // own doc comment referring to one.
         inputs->addValueInput(kInSheetHeight, "Sheet height", "mm",
                               ValueInput::createByReal(1000.0 * kMmToCm));
+        // Zero means unbounded, which is the coil case and was the only case
+        // before sheets. Nothing in the dialog says so better than the tooltip,
+        // because a value input has no "off" state to show.
+        if (Ptr<ValueCommandInput> w =
+                inputs->addValueInput(kInSheetWidth, "Sheet width", "mm",
+                                      ValueInput::createByReal(2000.0 * kMmToCm))) {
+            w->tooltip("Zero nests onto an unbounded strip instead of sheets.");
+        }
+        // A ceiling, not a target: the solve reports how many sheets it needed,
+        // and allocating more than that costs only the search space it prunes
+        // away anyway. Raise it when a nest overflows.
+        if (Ptr<IntegerSpinnerCommandInput> ms =
+                inputs->addIntegerSpinnerCommandInput(kInMaxSheets, "Max sheets", 1, 99, 1, 1)) {
+            ms->tooltip("How many sheets the nest may use. The result says how many it did.");
+        }
         inputs->addValueInput(kInSpacing, "Part spacing", "mm",
                               ValueInput::createByReal(2.0 * kMmToCm));
 

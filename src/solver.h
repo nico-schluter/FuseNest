@@ -37,8 +37,11 @@ void solverShutdown(const adsk::core::Ptr<adsk::core::Application>& app);
 
 /// Starts a solve. Returns false if one is already running or the thread could
 /// not start.
+///
+/// `sheets` may be null, which asks for the infinite strip; see NkSheets. It is
+/// copied, so the caller need not keep it alive.
 bool solverStart(const std::string& instanceJson, int budgetSeconds, int workers,
-                 std::string& error);
+                 const NkSheets* sheets, std::string& error);
 
 /// Moves everything the kernel has logged since the last call into the add-in's
 /// log file. Cheap when there is nothing pending, so it is fine to call on every

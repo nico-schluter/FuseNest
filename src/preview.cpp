@@ -114,6 +114,55 @@ Ptr<CustomGraphicsEntity> addOutlineLines(const Ptr<CustomGraphicsGroup>& group,
     return lines;
 }
 
+/// Sheet-boundary styling. Deliberately cool and dim against the warm orange
+/// the parts are drawn in: the sheets are the backdrop a layout is read
+/// against, not part of the layout.
+Ptr<CustomGraphicsColorEffect> sheetColor() {
+    static Ptr<CustomGraphicsColorEffect> effect;
+    if (!effect) effect = CustomGraphicsSolidColorEffect::create(Color::create(90, 140, 200, 255));
+    return effect;
+}
+
+/// Draws one rectangle per allocated sheet, as a single entity.
+///
+/// Never transformed, unlike the parts: a sheet is where it is. So this hangs
+/// off the top-level group rather than getting a slot in `g_entities`, and
+/// previewShow never has to know it exists.
+///
+/// All the allocated sheets are drawn, not just the ones in use, because the
+/// empty ones are the headroom -- seeing that a nest used two of six sheets is
+/// the whole point of having asked for six.
+void addSheetOutlines(const Ptr<CustomGraphicsGroup>& group, const PreviewSheets& sheets) {
+    if (sheets.count < 1 || sheets.widthMm <= 0.0 || sheets.heightMm <= 0.0) return;
+    const double pitch = sheets.pitchMm > 0.0 ? sheets.pitchMm : sheets.widthMm;
+
+    std::vector<double> coords;
+    std::vector<int> stripLengths;
+    coords.reserve(static_cast<std::size_t>(sheets.count) * 5 * 3);
+    for (int k = 0; k < sheets.count; ++k) {
+        const double x0 = pitch * k * kMmToCm;
+        const double x1 = (pitch * k + sheets.widthMm) * kMmToCm;
+        const double y1 = sheets.heightMm * kMmToCm;
+        for (const auto& pt : {std::pair{x0, 0.0}, std::pair{x1, 0.0}, std::pair{x1, y1},
+                               std::pair{x0, y1}, std::pair{x0, 0.0}}) {
+            coords.push_back(pt.first);
+            coords.push_back(pt.second);
+            coords.push_back(0.0);
+        }
+        stripLengths.push_back(5);
+    }
+
+    Ptr<CustomGraphicsCoordinates> c = CustomGraphicsCoordinates::create(coords);
+    if (!c) return;
+    Ptr<CustomGraphicsLines> lines =
+        group->addLines(c, std::vector<int>(), /*isLineStrip=*/true, stripLengths);
+    if (!lines) return;
+    lines->weight(1.0);
+    lines->color(sheetColor());
+    // Below the parts: the parts are what is being judged.
+    lines->depthPriority(0);
+}
+
 /// Fill styling. Translucent, so overlapping parts are visible as overlaps --
 /// which is the one thing a nesting preview must never hide.
 Ptr<CustomGraphicsColorEffect> fillColor() {
@@ -206,7 +255,7 @@ Ptr<CustomGraphicsEntity> buildOutline(const Profile& profile, std::size_t index
 }
 
 bool build(const Ptr<Application>& app, const std::vector<Profile>& profiles,
-           std::string& error) {
+           const PreviewSheets& sheets, std::string& error) {
     previewClear();
 
     Ptr<Component> root = rootOf(app);
@@ -220,6 +269,8 @@ bool build(const Ptr<Application>& app, const std::vector<Profile>& profiles,
         error = "could not create a custom graphics group";
         return false;
     }
+
+    addSheetOutlines(g_group, sheets);
 
     ensureTriangulated(profiles);
 
@@ -248,9 +299,9 @@ bool previewHasGeometry(const Ptr<Application>& app) {
 }
 
 bool previewBuild(const Ptr<Application>& app, const std::vector<Profile>& profiles,
-                  std::string& error) {
+                  const PreviewSheets& sheets, std::string& error) {
     ScopedTime _t("preview.build");
-    return build(app, profiles, error);
+    return build(app, profiles, sheets, error);
 }
 
 int previewShow(const std::vector<NkPlacement>& placements) {

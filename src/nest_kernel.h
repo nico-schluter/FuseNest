@@ -19,6 +19,20 @@ struct NkPlacement {
     float tx;         // millimetres
     float ty;
     std::uint32_t reflected;  // always 0 while we request no reflection axes
+    std::uint32_t sheet;      // 0-based; always 0 when the solve had no sheets
+};
+
+/// How the strip is cut into sheets.
+///
+/// Passed to nk_nest as a POINTER, and a null one asks for the infinite strip
+/// the add-in solved before sheets existed -- so the sheet machinery is opt-in
+/// and its absence costs nothing. The sheets are laid out along +x with `gap`
+/// of empty model space between them, which is where the kernel puts the
+/// immovable separators that stop a part straddling a boundary.
+struct NkSheets {
+    float width;               // one sheet, millimetres
+    float gap;                 // between sheets; 0 asks for a default
+    std::uint32_t max_sheets;  // allocated; see NkSnapshotInfo::sheets_used
 };
 
 struct NkProgress {
@@ -34,7 +48,8 @@ struct NkProgress {
 // Blocking. 0 success, -1 caught panic, -2 bad arguments, -3 solver or parse
 // error. Call on a worker thread: sparrow parallelises internally via workers.
 std::int32_t nk_nest(const char* input_json, std::uint64_t time_limit_ms,
-                     std::uint32_t n_workers, std::uint64_t seed);
+                     std::uint32_t n_workers, std::uint64_t seed,
+                     const NkSheets* sheets);
 
 // Safe from the main thread at any time, including while a solve runs.
 std::int32_t nk_progress(NkProgress* out);
@@ -54,6 +69,18 @@ struct NkSnapshotInfo {
     std::uint64_t count;  // placements held, which may exceed what a copy fits
     float strip_width;    // millimetres
     float density;        // fraction
+    /// Sheets this layout occupies. The caller allocates a maximum; this is the
+    /// answer. Zero when the solve had no sheets.
+    std::uint32_t sheets_used;
+    /// Parts that fit on no allocated sheet. They are NOT among the placements:
+    /// a part in the open space past the last sheet is not something anyone can
+    /// cut, so it is reported as a count and its body is left where it was.
+    std::uint32_t overflow;
+    /// Sheet-to-sheet distance: sheet width plus the gap between sheets. Comes
+    /// back from the kernel rather than being recomputed here, because a gap of
+    /// zero asks the kernel for its own default -- so this is the only thing
+    /// that knows where the sheet boundaries actually are.
+    float sheet_pitch;
 };
 
 // The published layout, replaced on every feasible improvement rather than

@@ -160,7 +160,7 @@ void solverShutdown(const Ptr<Application>& app) {
 }
 
 bool solverStart(const std::string& instanceJson, int budgetSeconds, int workers,
-                 std::string& error) {
+                 const NkSheets* sheets, std::string& error) {
     if (g_busy.exchange(true)) {
         error = "a nest is already running";
         return false;
@@ -173,9 +173,15 @@ bool solverStart(const std::string& instanceJson, int budgetSeconds, int workers
     try {
         // The job string is copied into the thread: the caller's buffer is long
         // gone by the time the solver reads it.
-        g_thread = std::thread([json = instanceJson, budgetMs, n] {
+        // The sheet spec is copied into the thread for the same reason the job
+        // string is: the caller's struct is long gone by the time nk_nest reads
+        // it, and it is read on the worker, not here.
+        const bool sheeted = sheets != nullptr;
+        const NkSheets spec = sheeted ? *sheets : NkSheets{};
+        g_thread = std::thread([json = instanceJson, budgetMs, n, sheeted, spec] {
             const auto t0 = std::chrono::steady_clock::now();
-            const int rc = nk_nest(json.c_str(), budgetMs, n, 0xC0FFEE);
+            const int rc =
+                nk_nest(json.c_str(), budgetMs, n, 0xC0FFEE, sheeted ? &spec : nullptr);
             g_elapsedMs = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0)
                               .count();

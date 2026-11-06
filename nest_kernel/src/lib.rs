@@ -73,6 +73,7 @@ struct Snapshot {
     density: f32,
     sheets_used: u32,
     overflow: u32,
+    sheet_pitch: f32,
 }
 
 static SNAPSHOT: Mutex<Snapshot> = Mutex::new(Snapshot {
@@ -81,6 +82,7 @@ static SNAPSHOT: Mutex<Snapshot> = Mutex::new(Snapshot {
     density: 0.0,
     sheets_used: 0,
     overflow: 0,
+    sheet_pitch: 0.0,
 });
 
 /// Bumped every time SNAPSHOT is replaced. The main thread uses it to tell a
@@ -127,6 +129,11 @@ pub struct NkSnapshotInfo {
     /// `placements` entirely: a part in the open space past the last sheet is not
     /// something anyone can cut, so it is reported as a number, not a position.
     pub overflow: u32,
+    /// Sheet-to-sheet distance: the sheet width plus the gap between sheets.
+    /// Reported rather than left to the caller to recompute because the gap may
+    /// have been defaulted here, and a caller drawing sheet boundaries at a
+    /// pitch the solve did not use would draw them in the wrong places.
+    pub sheet_pitch: f32,
 }
 
 #[repr(C)]
@@ -236,6 +243,7 @@ fn reset_published_state() {
         g.density = 0.0;
         g.sheets_used = 0;
         g.overflow = 0;
+        g.sheet_pitch = 0.0;
     }
     // Not reset to zero: a monotonic counter means a stale generation held by
     // the main thread can never accidentally match a new solve's first
@@ -363,6 +371,7 @@ fn publish_snapshot(
             density,
             sheets_used,
             overflow,
+            sheet_pitch: sheets.map_or(0.0, |s| s.pitch),
         };
     }
     // Release: everything written above must be visible to a thread that sees
@@ -763,6 +772,7 @@ pub extern "C" fn nk_snapshot_copy(
                 density: guard.density,
                 sheets_used: guard.sheets_used,
                 overflow: guard.overflow,
+                sheet_pitch: guard.sheet_pitch,
             };
         }
     }

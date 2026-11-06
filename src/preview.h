@@ -48,6 +48,22 @@
 
 namespace fusenest {
 
+/// The sheet boundaries to draw behind the parts.
+///
+/// `pitch` comes from the kernel's snapshot rather than being derived from
+/// `widthMm` here: a request may leave the inter-sheet gap at zero, which asks
+/// the kernel for its own default, so the kernel is the only thing that knows
+/// where the boundaries are. Drawing them anywhere else would show a part
+/// sitting outside a sheet it is in fact inside, or the reverse.
+///
+/// A `count` of zero draws nothing, which is the unbounded-strip case.
+struct PreviewSheets {
+    double widthMm = 0.0;
+    double heightMm = 0.0;
+    double pitchMm = 0.0;
+    int count = 0;
+};
+
 /// Builds the geometry for one preview pass.
 ///
 /// Must be called from inside executePreview -- see the transaction rule
@@ -55,7 +71,8 @@ namespace fusenest {
 /// runs once per redraw; triangulation is cached internally and is NOT redone
 /// unless the profiles themselves change.
 bool previewBuild(const adsk::core::Ptr<adsk::core::Application>& app,
-                  const std::vector<Profile>& profiles, std::string& error);
+                  const std::vector<Profile>& profiles, const PreviewSheets& sheets,
+                  std::string& error);
 
 /// Whether geometry is currently live in the document.
 ///
