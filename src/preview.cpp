@@ -129,9 +129,10 @@ Ptr<CustomGraphicsColorEffect> sheetColor() {
 /// off the top-level group rather than getting a slot in `g_entities`, and
 /// previewShow never has to know it exists.
 ///
-/// All the allocated sheets are drawn, not just the ones in use, because the
-/// empty ones are the headroom -- seeing that a nest used two of six sheets is
-/// the whole point of having asked for six.
+/// Only the sheets the layout occupies are drawn. The kernel allocates spare
+/// sheets to spill onto rather than being told a count, so the spares are an
+/// implementation detail of the search: framing them would show the user stock
+/// they never asked about.
 void addSheetOutlines(const Ptr<CustomGraphicsGroup>& group, const PreviewSheets& sheets) {
     if (sheets.count < 1 || sheets.widthMm <= 0.0 || sheets.heightMm <= 0.0) return;
     const double pitch = sheets.pitchMm > 0.0 ? sheets.pitchMm : sheets.widthMm;

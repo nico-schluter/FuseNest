@@ -60,7 +60,11 @@ namespace fusenest {
 struct PreviewSheets {
     double widthMm = 0.0;
     double heightMm = 0.0;
+    /// Sheet-to-sheet distance. The kernel resolves the gap, so this comes from
+    /// the snapshot at draw time rather than from the request.
     double pitchMm = 0.0;
+    /// How many sheets to draw: the ones the layout is ON. Also from the
+    /// snapshot, for the same reason -- the kernel allocates the sheets.
     int count = 0;
 };
 

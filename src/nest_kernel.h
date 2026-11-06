@@ -29,10 +29,15 @@ struct NkPlacement {
 /// and its absence costs nothing. The sheets are laid out along +x with `gap`
 /// of empty model space between them, which is where the kernel puts the
 /// immovable separators that stop a part straddling a boundary.
+///
+/// How MANY sheets is not asked here. A bound that binds turns the nest into a
+/// different problem -- which parts fit in N bins, rather than how little stock
+/// the set needs -- so the kernel allocates enough that it does not bind and
+/// reports what it used. See SheetSpec::allocation on the Rust side.
 struct NkSheets {
     float width;               // one sheet, millimetres
     float gap;                 // between sheets; 0 asks for a default
-    std::uint32_t max_sheets;  // allocated; see NkSnapshotInfo::sheets_used
+    std::uint32_t max_sheets;  // 0 lets the kernel allocate; see sheets_used
 };
 
 struct NkProgress {

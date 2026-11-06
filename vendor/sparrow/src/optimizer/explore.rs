@@ -40,22 +40,29 @@ pub fn exploration_phase(sep: &mut Separator, sol_listener: &mut impl SolutionLi
         let total_loss = local_best.1.get_total_loss();
 
         if total_loss == 0.0 {
-            let mut feasible = local_best.0.clone();
+            let feasible = local_best.0.clone();
             // FuseNest fork: a sheet nest starts from a strip wide enough for every
             // allocated sheet, so the first feasible layout can leave whole sheets
-            // empty at the right. Collapse that span in one step -- otherwise the
-            // multiplicative shrink below needs dozens of rounds, each paying for a
-            // full separation, just to reach the content it could have snapped to.
-            // The extent is movables-only, so the locked separators out in the empty
-            // span do not hold the objective open.
+            // empty at the right. Re-aim the objective at the content in one step --
+            // otherwise the multiplicative shrink below needs dozens of rounds, each
+            // paying for a full separation, just to reach the width it could have
+            // snapped to. The extent is movables-only, so the locked separators out
+            // in the empty span do not hold the objective open.
+            //
+            // `set_virtual_width`, NOT `change_strip_width`: this re-aims the
+            // objective and moves NOTHING. Shifting here would be wrong twice over.
+            // A shift of this size -- whole empty sheets -- drives half the layout
+            // through the separators, and there is no separation pass between here
+            // and `feasible` being recorded, so the wreckage would be reported and
+            // returned as a feasible solution. It was: twelve parts sitting on top of
+            // separators in a layout the solver called separated. The shrink steps
+            // below may shift, because a separation always follows them.
             if !sep.locked.is_empty() {
                 let snapped = current_width.min(sep.solution_width(&feasible));
-                // Cannot fail: with items locked, `change_strip_width` leaves the
-                // physical strip alone, and it is only the resize that can fail.
-                if snapped < current_width && sep.change_strip_width(snapped, None).is_ok() {
-                    debug!("[EXPL] snapping strip to movable content extent: {:.3} -> {:.3}", current_width, snapped);
+                if snapped < current_width {
+                    debug!("[EXPL] snapping objective to movable content extent: {:.3} -> {:.3}", current_width, snapped);
+                    sep.set_virtual_width(snapped);
                     current_width = snapped;
-                    feasible = sep.prob.save();
                 }
             }
             // If successfully separated

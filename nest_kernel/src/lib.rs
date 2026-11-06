@@ -355,6 +355,35 @@ fn objective_density(
     }
 }
 
+/// Collision loss left in a finished solution, quantified from scratch: zero for
+/// any layout anyone can cut.
+///
+/// Rebuilds the layout -- and with it the collision engine -- from the solution's
+/// own snapshot, so nothing of the solver's bookkeeping is taken on trust. That
+/// is the point. sparrow decides a layout is separated by reading a tracker it
+/// maintains incrementally across millions of moves, and a layout the tracker has
+/// lost track of looks exactly like a good one from the outside: the reported
+/// density, width and sheet count are all perfectly ordinary. A patch to the
+/// exploration phase once returned a nest with twelve parts sitting on top of
+/// separators and every number looking right.
+///
+/// `locked` matters because a separator laid flush against the strip's own edge
+/// is not a collision, and two separators cannot be asked to separate from each
+/// other. The virtual width is deliberately infinite here: this measures
+/// OVERLAP, not whether the layout met its width objective.
+pub fn unresolved_collisions(
+    solution: &jagua_rs::probs::spp::entities::SPSolution,
+    locked: Arc<HashSet<usize>>,
+) -> f32 {
+    let layout = jagua_rs::entities::Layout::from_snapshot(solution.layout_snapshot());
+    sparrow::quantify::tracker::CollisionTracker::new_movable_width(
+        &layout,
+        locked,
+        f32::INFINITY,
+    )
+    .get_total_loss()
+}
+
 /// Replaces the published layout with this solution's.
 ///
 /// Only ever called with a FEASIBLE solution. sparrow also reports solutions
@@ -531,6 +560,23 @@ fn run_nest(
     tuning: &NkTuning,
     spec: Option<SheetSpec>,
 ) -> Result<String, String> {
+    let (solution, sheets) = solve(input_json, tuning, spec)?;
+    // The listener already published this exact solution as a snapshot when
+    // optimize() reported it as ReportType::Final, so there is nothing to store
+    // here -- only the JSON to hand back.
+    solution_json(&solution, sheets.as_ref())
+}
+
+/// A solve, stopping short of the JSON: the layout, and the sheets it was laid
+/// out on.
+///
+/// Split from [`run_nest`] so that the layout can be quantified rather than
+/// merely described -- see `unresolved_collisions`, and the test that uses it.
+fn solve(
+    input_json: &str,
+    tuning: &NkTuning,
+    spec: Option<SheetSpec>,
+) -> Result<(jagua_rs::probs::spp::entities::SPSolution, Option<SheetStrip>), String> {
     reset_published_state();
 
     let mut ext: ExtSPInstance =
@@ -597,6 +643,7 @@ fn run_nest(
         Some(s) => (Some(s.warm_start(&instance, lbf_rng)?), s.locked()),
     };
 
+    let locked_audit = locked.clone();
     let solution = optimize(
         instance,
         rng,
@@ -609,10 +656,19 @@ fn run_nest(
     )
     .map_err(|e| format!("optimize: {e}"))?;
 
-    // The listener already published this exact solution as a snapshot when
-    // optimize() reported it as ReportType::Final, so there is nothing to store
-    // here -- only the JSON to hand back.
-    solution_json(&solution, sheets.as_ref())
+    // Cheap enough to do on every solve, and the only check that would catch a
+    // layout the solver's own bookkeeping has lost track of. Logged rather than
+    // raised: the layout is still the best thing anyone has, and a nest the user
+    // can see and reject beats an error they cannot act on.
+    match unresolved_collisions(&solution, locked_audit) {
+        0.0 => {}
+        loss => log::warn!(
+            "the returned layout is not fully separated (collision loss {loss}); \
+             parts may overlap each other or a sheet boundary"
+        ),
+    }
+
+    Ok((solution, sheets))
 }
 
 /// A solution as JSON: sparrow's own `ExtSPSolution`, plus a `sheets` object
@@ -653,9 +709,9 @@ pub fn solution_json(
 
 /// How the caller wants the strip cut into sheets, across the ABI.
 ///
-/// A null pointer, or `max_sheets` below two, asks for the plain infinite strip
-/// the add-in solved before sheets existed -- so the sheet machinery is opt-in
-/// and its absence costs nothing.
+/// A null pointer, or a width of zero, asks for the plain infinite strip the
+/// add-in solved before sheets existed -- so the sheet machinery is opt-in and
+/// its absence costs nothing.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct NkSheets {
@@ -663,8 +719,11 @@ pub struct NkSheets {
     pub width: f32,
     /// Empty model space between neighbouring sheets. Zero asks for a default.
     pub gap: f32,
-    /// Sheets to allocate. The solve reports how many it needed, in
-    /// `NkSnapshotInfo::sheets_used`.
+    /// An upper bound on the sheets to allocate, or zero -- the normal case --
+    /// to let the kernel allocate enough that the bound does not bind. Either
+    /// way the solve reports how many sheets it needed, in
+    /// `NkSnapshotInfo::sheets_used`, and what would not fit on them, in
+    /// `NkSnapshotInfo::overflow`.
     pub max_sheets: u32,
 }
 
@@ -1134,6 +1193,91 @@ mod tests {
             "a roomy single sheet packed worse than the strip: {:.3} vs {:.3}",
             info.strip_width,
             strip.strip_width
+        );
+    }
+
+    /// The invariant the separators exist for, checked without asking the solver
+    /// whether it is happy: nothing in the returned layout overlaps anything.
+    ///
+    /// Because the bug this pins did exactly that -- asked, and was told yes. The
+    /// exploration phase snaps its objective in to the content once the first
+    /// feasible layout is found, collapsing the empty sheets the allocation left
+    /// at the right. That snap used to SHIFT the layout, and nothing separates
+    /// between the shift and the solution being recorded as feasible, so parts
+    /// were driven through the separators and the wreckage was reported,
+    /// compressed and returned as a separated solution: twelve parts sitting on
+    /// top of separators, with the density, the width and the sheet count all
+    /// looking perfectly ordinary.
+    ///
+    /// The add-in's own instance at a sheet width that needs a dozen sheets,
+    /// because that is the shape of job that reproduced it. Empty trailing sheets
+    /// are what give the snap something to collapse, so the automatic allocation
+    /// is part of the test rather than a count chosen here.
+    #[test]
+    fn the_returned_layout_is_separated() {
+        let json = std::fs::read_to_string("../fusenest_instance.json").expect("instance json");
+        nk_log_set_level(0);
+
+        let mut ext: ExtSPInstance = serde_json::from_str(&json).expect("instance JSON");
+        let spec = SheetSpec { width: 300.0, max_sheets: 0, gap: 0.0 };
+        let sheets = SheetStrip::prepare(&mut ext, &spec)
+            .expect("sheets are possible")
+            .expect("sheets were asked for");
+        assert!(sheets.count > 2, "this instance should need several sheets, not {}", sheets.count);
+
+        // Re-derived rather than returned by the solve: `prepare` is a pure
+        // function of the instance and the spec, so the item it appends -- and the
+        // index the solve locks -- is the same one either way.
+        let locked = sheets.resolve(&solved_instance(&json, &spec)).expect("separator index").locked();
+
+        let (solution, _) = solve(&json, &comparable(BUDGET_MS), Some(spec)).expect("sheet solve");
+        let loss = unresolved_collisions(&solution, locked);
+        assert_eq!(loss, 0.0, "the returned layout has {loss} of unresolved collision loss");
+    }
+
+    /// The instance as the solve imports it, for a test that needs the separator's
+    /// item index.
+    fn solved_instance(json: &str, spec: &SheetSpec) -> jagua_rs::probs::spp::entities::SPInstance {
+        let mut ext: ExtSPInstance = serde_json::from_str(json).expect("instance JSON");
+        SheetStrip::prepare(&mut ext, spec).expect("sheets are possible");
+        let cfg = DEFAULT_SPARROW_CONFIG;
+        let importer = Importer::new(
+            cfg.cde_config,
+            cfg.poly_simpl_tolerance,
+            cfg.narrow_concavity_cutoff_ratio,
+        );
+        jagua_rs::probs::spp::io::import_instance(&importer, &ext).expect("import")
+    }
+
+    /// The case the add-in now always asks for: sheets, and no count. The
+    /// allocation has to be its own answer -- generous enough that nothing is
+    /// left off the sheets, and reported so the caller can see what it chose.
+    ///
+    /// Small sheets, so this is genuinely a multi-sheet nest rather than the
+    /// single-sheet path with an estimate in front of it: the set's own area is
+    /// several times one sheet's.
+    #[test]
+    fn an_automatic_allocation_holds_the_whole_set() {
+        let json = rect_instance(200.0, SEPARATION, PARTS);
+        nk_log_set_level(0);
+
+        let spec = SheetSpec { width: 150.0, max_sheets: 0, gap: 10.0 };
+        let out = run_nest(&json, &comparable(BUDGET_MS), Some(spec)).expect("sheet solve");
+        let sol: serde_json::Value = serde_json::from_str(&out).expect("result JSON");
+        let (placements, info) = snapshot();
+
+        let allocated = sol["sheets"]["allocated"].as_u64().expect("allocated sheets");
+        println!(
+            "{} of {allocated} sheets used, {} overflow",
+            info.sheets_used, info.overflow
+        );
+        assert_eq!(placements.len(), PARTS, "every part is on a sheet");
+        assert_eq!(info.overflow, 0, "the allocation left nowhere to spill");
+        assert!(info.sheets_used > 1, "a 150x200 sheet cannot hold this set on its own");
+        assert!(
+            u64::from(info.sheets_used) <= allocated,
+            "more sheets used than allocated: {} of {allocated}",
+            info.sheets_used
         );
     }
 

@@ -248,13 +248,20 @@ def main():
 
     # An axis-aligned box test first: exact segment work is O(n*m) per pair and
     # only the near neighbours can ever beat the running minimum.
+    #
+    # Boxes that OVERLAP are always checked exactly, whatever the running
+    # minimum. Pruning them on `>= worst` looks sound and is not: the first
+    # overlap found sets worst to 0.0, after which every remaining pair is
+    # pruned and every further overlap goes unreported. This checker found one
+    # of twelve parts sitting on top of separators that way.
     boxes = [bbox(ring) for _, ring in placed]
     worst = float("inf")
     worst_pair = None
     exact = 0
     for i in range(len(placed)):
         for j in range(i + 1, len(placed)):
-            if bbox_gap(boxes[i], boxes[j]) >= worst:
+            gap = bbox_gap(boxes[i], boxes[j])
+            if gap > 0.0 and gap >= worst:
                 continue
             exact += 1
             d = clearance(placed[i][1], placed[j][1])

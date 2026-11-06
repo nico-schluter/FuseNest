@@ -66,7 +66,14 @@ Every touched file, one line each:
   excludes locked items from the "large item" cutoff, from swap selection and
   from "practically contained" drag-along; exploration snaps the virtual width
   down to the rightmost movable before the multiplicative shrink, so empty
-  trailing sheets collapse in one step instead of many 2% rounds.
+  trailing sheets collapse in one step instead of many 2% rounds. That snap
+  re-aims the objective (`set_virtual_width`) and moves nothing. Doing it with
+  `change_strip_width`, which shifts every movable right of a split point, was
+  the one real bug this fork has had: no separation runs between the shift and
+  the solution being recorded as feasible, so a snap across empty sheets drove
+  parts through the separators and the result was reported, compressed and
+  returned as separated. `nest_kernel`'s `the_returned_layout_is_separated`
+  quantifies the returned layout from scratch and would catch it again.
 - `src/optimizer/compress.rs` -- compression targets and split sampling are
   based on the movable virtual width.
 - `src/quantify/tracker.rs` -- locked items are excluded from total loss and

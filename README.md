@@ -58,11 +58,17 @@ lay the sheets end to end into one strip and drop an immovable rectangle -- a
 That needs two things upstream sparrow cannot express, which is why the fork
 exists: items that never move, and a width objective that ignores them.
 
-Sheet count is an **output**, the way strip width always was. The dialog's Max
-sheets is a ceiling; the result says how many sheets the nest needed, and parts
-that fit nowhere are reported as overflow and left where they are rather than
-moved into the open space past the last sheet. A sheet width of zero keeps the
-unbounded strip, which is still what you want for coil stock.
+Sheet count is an **output**, the way strip width always was, and it is
+deliberately not an input either: a count that binds turns the nest into a
+different problem -- which parts fit in N bins, rather than how little stock the
+set needs -- and a strip packer is not the tool for that. So the dialog asks only
+for a sheet width, and the kernel allocates enough sheets to spill onto
+(`SheetSpec::allocation`: part area over sheet area at an assumed density, plus a
+spare sheet, capped at one sheet per part). The result says how many it came to.
+
+Parts that still fit nowhere are reported as overflow and left where they are
+rather than moved into the open space past the last sheet. A sheet width of zero
+keeps the unbounded strip, which is still what you want for coil stock.
 
 `nest_kernel/src/sheets.rs` has the geometry, including why a separator whose
 ring is exactly the gap rectangle makes sheet assignment a division.
@@ -131,6 +137,15 @@ nesting rests on, and the only check that would catch a separator in the wrong
 place, so it is deliberately done from the geometry rather than from anything
 the solver says about itself.
 
+Asking the solver whether it is happy is not a check. sparrow decides a layout
+is separated by reading a tracker it maintains incrementally across millions of
+moves; a layout it has lost track of looks exactly like a good one from the
+outside, with a perfectly ordinary width, density and sheet count. So every
+solve also calls `unresolved_collisions`, which rebuilds the layout and its
+collision engine from the solution and quantifies it from scratch -- anything
+but zero is logged as a warning. The probe prints it, and
+`the_returned_layout_is_separated` asserts it.
+
 To solve without Fusion at all, including onto sheets:
 
 ```bash
@@ -138,9 +153,13 @@ cd nest_kernel
 cargo run --release --example probe -- ../fusenest_instance.json 8000 50x4+10 > sol.json
 ```
 
-`50x4+10` is four sheets 50 mm wide with a 10 mm gap; drop the argument for the
-plain strip. The probe prints what jagua-rs made of each item on import, which
-is the other thing that cannot be asked from inside Fusion.
+`50` is 50 mm sheets, as many as the kernel allocates; `50x4+10` pins the count
+at four with a 10 mm gap, which the add-in never does and which is only there to
+study the allocation. Drop the argument for the plain strip.
+
+The probe prints what jagua-rs made of each item on import, which is the other
+thing that cannot be asked from inside Fusion, and the unresolved collision loss
+of both the warm start and the returned layout.
 
 ## Things that will bite
 

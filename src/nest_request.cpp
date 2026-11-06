@@ -21,7 +21,6 @@ std::string NestRequest::describe() const {
        << "sheet width:  "
        << (sheetWidthMm > 0.0 ? std::to_string(sheetWidthMm) + " mm" : std::string("unbounded"))
        << "\n"
-       << "max sheets:   " << maxSheets << "\n"
        << "spacing:      " << partSpacingMm << " mm\n"
        << "rotation:     " << rotationModeLabel(rotation) << "\n"
        << "budget:       " << timeBudgetSeconds << " s\n"

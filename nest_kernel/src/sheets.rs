@@ -34,11 +34,18 @@
 //! # Sheet count is an output
 //!
 //! A strip packing problem places EVERY item; its width is the answer, not a
-//! constraint. Sheets inherit that: the caller says how many sheets to allocate
-//! and the solver reports how many it needed. There is no trailing separator
-//! after the last sheet, so parts that do not fit in the allocation end up in
-//! open space past it, where [`SheetStrip::classify`] reports them as overflow
-//! rather than quietly pretending they are on a sheet.
+//! constraint. Sheets inherit that: the solver reports how many sheets it
+//! needed. There is no trailing separator after the last sheet, so parts that do
+//! not fit in the allocation end up in open space past it, where
+//! [`SheetStrip::classify`] reports them as overflow rather than quietly
+//! pretending they are on a sheet.
+//!
+//! So the allocation is not a limit anyone should be asked to set: an allocation
+//! that binds turns the question from "how little strip does this need" into
+//! "which parts fit in this many bins", which is a different optimisation
+//! problem and not the one sparrow is good at. The caller therefore normally
+//! asks for no particular count and [`SheetSpec::allocation`] picks one with
+//! room to spill -- see there for what pulls the number in both directions.
 //!
 //! A SINGLE sheet therefore needs no separator at all: with no neighbour there
 //! is no boundary to defend, and the solve is the plain strip packing it always
@@ -59,6 +66,7 @@ use jagua_rs::geometry::DTransformation;
 use jagua_rs::geometry::primitives::Rect;
 use jagua_rs::io::import::ext_to_int_transformation;
 use jagua_rs::probs::spp::entities::{SPInstance, SPPlacement, SPProblem, SPSolution};
+use jagua_rs::io::ext_repr::ExtShape;
 use jagua_rs::probs::spp::io::ext_repr::{ExtItem, ExtSPInstance};
 
 /// External item id for the separator. Far above any profile index the add-in
@@ -86,7 +94,8 @@ fn fit_tolerance(x: f32) -> f32 {
 pub struct SheetSpec {
     /// One sheet's width, in the same units as the instance.
     pub width: f32,
-    /// How many sheets to allocate. The solve reports how many it used.
+    /// An upper bound on the sheets to allocate, or zero to let
+    /// [`SheetSpec::allocation`] derive one. The solve reports how many it used.
     pub max_sheets: u32,
     /// Empty model space between neighbouring sheets. Zero asks for a default.
     pub gap: f32,
@@ -101,6 +110,123 @@ impl SheetSpec {
             g if g > 0.0 => g,
             _ => f32::max(10.0, 2.0 * separation),
         }
+    }
+
+    /// How many sheets to allocate when the caller named no count: enough that
+    /// the allocation does not bind, and no more.
+    ///
+    /// Both directions cost something, which is why this is a derived number
+    /// rather than a generous constant.
+    ///
+    /// Allocating too FEW is the worse failure, and not only because parts end
+    /// up off the sheets: a binding allocation changes the problem. Fitting as
+    /// many parts as possible into a fixed number of bins is not what a strip
+    /// packer optimises, so a nest held to too few sheets does worse than one
+    /// allowed to spill onto another.
+    ///
+    /// Allocating too MANY is not free either. The physical strip is the whole
+    /// allocation wide, and jagua-rs builds its collision quadtree over the
+    /// container at a fixed depth, so a strip twice as wide as the work needs
+    /// has cells twice as coarse everywhere the parts actually are.
+    ///
+    /// The estimate is the FOOTPRINT each part consumes -- its bounding box
+    /// grown by the part spacing -- over the sheet area, divided by a shelf
+    /// efficiency no reasonable nest falls below, plus one whole sheet of
+    /// headroom so that a nest which just misses its last sheet spills onto a
+    /// real one.
+    ///
+    /// Footprint rather than area, and this is where the first version of this
+    /// estimate went wrong twice over. The spacing is not free: at the 20 mm
+    /// spacing the add-in's test instance uses, a 50 mm part occupies a 70 mm
+    /// cell and needs nearly twice its own area in sheet. And the part's own
+    /// area is not what a row of parts consumes either: a round-ish part leaves
+    /// corners no shelf can use. Counting raw area left a third of that instance
+    /// standing off the end of the sheets; counting the spacing ring exactly
+    /// still left two parts off it.
+    ///
+    /// Parts that genuinely interlock -- triangles, Ls -- beat their bounding
+    /// boxes, so this over-allocates for them. That costs a wider strip and
+    /// nothing else: the spare sheets go unused, which is what the movables-only
+    /// objective is for.
+    pub fn allocation(&self, ext: &ExtSPInstance) -> u32 {
+        // Full sheet area, not deflated by the spacing: by this module's
+        // invariant the inflated shapes live in exactly [0, W] x [0, H], so the
+        // spacing is already counted once, on the items.
+        let sheet_area = self.width * ext.strip_height;
+        let separation = ext.min_item_separation.max(0.0);
+        let (parts, demand_area) = ext.items.iter().fold((0u64, 0.0f32), |(n, a), item| {
+            let area = footprint(&item.base.shape, separation);
+            (n + item.demand, a + item.demand as f32 * area)
+        });
+        if sheet_area <= 0.0 || parts == 0 {
+            return 1;
+        }
+        let estimate = (demand_area / (sheet_area * SHELF_EFFICIENCY_FLOOR)).ceil();
+        let estimate = f32::max(estimate, 1.0) as u64 + 1;
+        estimate.min(parts).min(u64::from(MAX_ALLOCATION)) as u32
+    }
+}
+
+/// How much of a sheet the automatic allocation assumes gets filled with part
+/// footprints.
+///
+/// Not a yield figure: footprints already carry the spacing, so what this has to
+/// allow for is the waste between rows and at the sheet's far edge, which is what
+/// stops a sheet taking a whole number of rows, plus the corners a round-ish part
+/// leaves in its own cell. Measured at 0.60 on the add-in's own test instance --
+/// 95 compact parts at 20 mm spacing, which came to thirteen 300x200 sheets -- so
+/// this is set at that figure rather than above it. The headroom costs a coarser
+/// quadtree (see [`SheetSpec::allocation`]) and running short costs a sheet's
+/// worth of parts standing off to the side, so neither side wants slack it cannot
+/// justify.
+const SHELF_EFFICIENCY_FLOOR: f32 = 0.6;
+
+/// Most sheets the automatic allocation will ever ask for.
+///
+/// Guards the arithmetic against its own inputs: a sheet width mistyped by three
+/// orders of magnitude would otherwise allocate separators by the thousand and
+/// make the solve look hung rather than wrong.
+const MAX_ALLOCATION: u32 = 256;
+
+/// How much sheet one part consumes, for the allocation estimate only: its
+/// bounding box grown by the spacing it has to keep from its neighbours.
+///
+/// The spacing is counted once, not twice, because that is how jagua-rs enforces
+/// it -- every shape inflated by `s/2`, so two touching cells are `s` apart --
+/// and it is why this module's invariant can put a flush part exactly on a sheet
+/// boundary.
+///
+/// Measured on the shape AS SENT rather than after import, because the
+/// separator's demand -- and so the sheet count -- has to be fixed before the
+/// instance is imported. jagua-rs may simplify a polygon on import, but only
+/// within a tolerance far below the slack the shelf floor already carries.
+fn footprint(shape: &ExtShape, separation: f32) -> f32 {
+    /// Bounding box extents of a ring.
+    fn extents(pts: &[(f32, f32)]) -> (f32, f32) {
+        let fold = |f: fn(f32, f32) -> f32, sel: fn(&(f32, f32)) -> f32| {
+            pts.iter().map(sel).fold(f32::NAN, f)
+        };
+        (
+            fold(f32::max, |p| p.0) - fold(f32::min, |p| p.0),
+            fold(f32::max, |p| p.1) - fold(f32::min, |p| p.1),
+        )
+    }
+    let (w, h) = match shape {
+        ExtShape::Rectangle { width, height, .. } => (*width, *height),
+        ExtShape::SimplePolygon(p) => extents(&p.0),
+        ExtShape::Polygon(p) => extents(&p.outer.0),
+        // Disjoint pieces are one item and are placed as one, so their common
+        // bounding box is the footprint.
+        ExtShape::MultiPolygon(ps) => {
+            let rings: Vec<(f32, f32)> = ps.iter().flat_map(|p| p.outer.0.iter().copied()).collect();
+            extents(&rings)
+        }
+    };
+    // NaN from an empty ring would poison the sum; such a shape does not survive
+    // import anyway, so it contributes nothing here.
+    match w.is_finite() && h.is_finite() {
+        true => (w + separation) * (h + separation),
+        false => 0.0,
     }
 }
 
@@ -136,8 +262,8 @@ impl SheetStrip {
     /// Describes `spec` as a strip, adding the separator item to `ext` if more
     /// than one sheet was asked for.
     ///
-    /// `Ok(None)` means no sheets were asked for, which leaves the solve exactly
-    /// as it was before sheets existed. `Err` means sheets were asked for and
+    /// `Ok(None)` means no sheets were asked for -- a width of zero -- which
+    /// leaves the solve exactly as it was before sheets existed. `Err` means sheets were asked for and
     /// cannot be had -- reported rather than quietly falling back to the
     /// unbounded strip, because a caller who asked to nest onto sheets and got
     /// a strip instead has been given the wrong answer, not a lesser one.
@@ -146,9 +272,15 @@ impl SheetStrip {
     /// every gap is the same rectangle, and a locked item index locks all of its
     /// placements, so one item is both cheaper and exactly as expressive.
     pub fn prepare(ext: &mut ExtSPInstance, spec: &SheetSpec) -> Result<Option<Self>, String> {
-        if spec.max_sheets < 1 || spec.width <= 0.0 {
+        if spec.width <= 0.0 {
             return Ok(None);
         }
+        // Zero asks this layer to choose, which is the normal case: see
+        // `SheetSpec::allocation` for why the count is nobody's input.
+        let count = match spec.max_sheets {
+            0 => spec.allocation(ext),
+            asked => asked,
+        };
         let separation = ext.min_item_separation.max(0.0);
         let height = ext.strip_height;
         if height <= 2.0 * separation {
@@ -161,12 +293,12 @@ impl SheetStrip {
         let mut strip = Self {
             width: spec.width,
             pitch: spec.width + gap,
-            count: spec.max_sheets,
+            count,
             height,
             separation,
             separator_idx: None,
         };
-        if spec.max_sheets < 2 {
+        if count < 2 {
             return Ok(Some(strip));
         }
         strip.separator_idx = Some(usize::MAX); // resolved after import
@@ -192,7 +324,7 @@ impl SheetStrip {
                 },
                 min_quality: None,
             },
-            demand: u64::from(spec.max_sheets - 1),
+            demand: u64::from(count - 1),
         });
 
         Ok(Some(strip))
@@ -352,6 +484,80 @@ mod tests {
             .expect("one sheet is still a sheet");
         assert!(!strip.has_separators(), "a lone sheet has no boundary to defend");
         assert!(ext.items.is_empty(), "and so adds nothing to the instance");
+    }
+
+    /// `n` parts of `w` x `h`, as the add-in would send them.
+    fn parts(n: u64, w: f32, h: f32, strip_height: f32) -> ExtSPInstance {
+        ExtSPInstance {
+            name: "t".into(),
+            min_item_separation: 2.0,
+            items: (0..n)
+                .map(|i| ExtItem {
+                    base: jagua_rs::io::ext_repr::ExtItem {
+                        id: i,
+                        orientation: jagua_rs::io::ext_repr::ExtOrientation {
+                            rotation: jagua_rs::io::ext_repr::ExtRotation::Discrete {
+                                angles: vec![0.0],
+                            },
+                            reflection_axes: vec![],
+                        },
+                        shape: ExtShape::Rectangle { x_min: 0.0, y_min: 0.0, width: w, height: h },
+                        min_quality: None,
+                    },
+                    demand: 1,
+                })
+                .collect(),
+            strip_height,
+        }
+    }
+
+    /// The point of the automatic allocation: there is always somewhere to
+    /// spill, so the count never becomes the constraint the solver is working
+    /// against. Twelve 100x100 parts come to three of these sheets at the assumed
+    /// shelf efficiency, and get a fourth to spill onto.
+    #[test]
+    fn an_unasked_count_allocates_room_to_spill() {
+        let ext = parts(12, 100.0, 100.0, 100.0);
+        let spec = SheetSpec { width: 1000.0, max_sheets: 0, gap: 10.0 };
+        assert_eq!(spec.allocation(&ext), 4);
+    }
+
+    /// The estimate that was wrong first time round. At 20 mm spacing a 50 mm
+    /// part occupies a 70 mm cell, so it needs very nearly twice its own area in
+    /// sheet -- and an allocation that counted raw area left a third of the set
+    /// standing off the end.
+    #[test]
+    fn the_spacing_ring_counts_towards_the_sheets() {
+        let mut ext = parts(96, 50.0, 50.0, 200.0);
+        ext.min_item_separation = 20.0;
+        let spec = SheetSpec { width: 300.0, max_sheets: 0, gap: 0.0 };
+
+        // Eight 70 mm cells fit on a 300x200 sheet, so the set needs twelve.
+        let allocated = spec.allocation(&ext);
+        assert!(
+            (13..=18).contains(&allocated),
+            "a twelve-sheet set should allocate a little over twelve, not {allocated}"
+        );
+    }
+
+    /// No packing here does worse than one part per sheet, so allocating past
+    /// that is strip nobody can use -- and a wider strip is a coarser quadtree.
+    #[test]
+    fn the_allocation_is_never_more_sheets_than_parts() {
+        let ext = parts(2, 10.0, 10.0, 1000.0);
+        let spec = SheetSpec { width: 1000.0, max_sheets: 0, gap: 10.0 };
+        assert_eq!(spec.allocation(&ext), 2);
+    }
+
+    /// A count the caller does name is taken as given: the probe and the tests
+    /// pin a count on purpose, and a bound asked for is not an estimate.
+    #[test]
+    fn an_asked_count_is_taken_as_asked() {
+        let mut ext = parts(12, 100.0, 100.0, 100.0);
+        let strip = SheetStrip::prepare(&mut ext, &spec())
+            .expect("three sheets are possible")
+            .expect("three sheets");
+        assert_eq!(strip.count, 3);
     }
 
     #[test]

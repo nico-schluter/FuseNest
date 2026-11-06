@@ -24,9 +24,6 @@ struct NestRequest {
     /// Zero nests onto an unbounded strip -- the behaviour before sheets, and
     /// still what you want when the stock is a coil rather than a sheet.
     double sheetWidthMm = 0.0;
-    /// Sheets to allocate. The solve reports how many it needed, so this is a
-    /// ceiling and not a target; one sheet is a perfectly ordinary answer.
-    int maxSheets = 1;
     double partSpacingMm = 0.0;
     RotationMode rotation = RotationMode::Half;
     int timeBudgetSeconds = 10;

@@ -41,7 +41,6 @@ constexpr double kMmToCm = 0.1;
 const char* kInParts = "fnParts";
 const char* kInSheetHeight = "fnSheetHeight";
 const char* kInSheetWidth = "fnSheetWidth";
-const char* kInMaxSheets = "fnMaxSheets";
 const char* kInSpacing = "fnSpacing";
 const char* kInRotation = "fnRotation";
 const char* kInBudget = "fnBudget";
@@ -83,7 +82,6 @@ struct SavedSetup {
     bool valid = false;
     double sheetHeightMm = 0.0;
     double sheetWidthMm = 0.0;
-    int maxSheets = 1;
     double partSpacingMm = 0.0;
     int rotationIndex = 1;
     int timeBudgetSeconds = 10;
@@ -273,15 +271,20 @@ std::string statusText() {
         os << "density " << static_cast<int>(g_shownInfo.density * 100.0) << " % &middot; ";
         // On sheets the sheet count IS the answer -- the width behind it is the
         // objective the solver minimised, not a number anyone orders stock by.
-        if (g_sheets.count > 0) {
-            os << g_shownInfo.sheets_used << " of " << g_sheets.count << " sheets";
+        if (g_sheets.widthMm > 0.0) {
+            os << g_shownInfo.sheets_used
+               << (g_shownInfo.sheets_used == 1 ? " sheet" : " sheets");
         } else {
             os << "width " << static_cast<long>(g_shownInfo.strip_width) << " mm";
         }
         os << " &middot; " << g_shown.size() << " parts placed";
+        // Not a failure, and worded so it does not read as one: these parts are
+        // laid out past the last sheet, which is as useful a place to find them
+        // as a further sheet would have been. It does mean the kernel allocated
+        // fewer sheets than this set wanted, so the sheet is worth a look.
         if (g_shownInfo.overflow) {
             os << "<br/><b>" << g_shownInfo.overflow
-               << " parts do not fit</b> &middot; raise Max sheets, or widen the sheet";
+               << " parts are off the sheets</b> &middot; widen the sheet, or nest fewer";
         }
         // The ordinal is not decoration. Writing this textbox is what triggers
         // the redraw, so the string has to differ every time -- and the rounded
@@ -343,7 +346,6 @@ void rememberSetup(const Ptr<CommandInputs>& inputs, const NestRequest& req) {
     g_saved = SavedSetup{};
     g_saved.sheetHeightMm = req.sheetHeightMm;
     g_saved.sheetWidthMm = req.sheetWidthMm;
-    g_saved.maxSheets = req.maxSheets;
     g_saved.partSpacingMm = req.partSpacingMm;
     g_saved.timeBudgetSeconds = req.timeBudgetSeconds;
     g_saved.workers = req.workers;
@@ -378,8 +380,6 @@ NestRequest readInputs(const Ptr<CommandInputs>& inputs) {
         req.sheetHeightMm = v->value() * kCmToMm;
     if (Ptr<ValueCommandInput> v = inputs->itemById(kInSheetWidth))
         req.sheetWidthMm = v->value() * kCmToMm;
-    if (Ptr<IntegerSpinnerCommandInput> s = inputs->itemById(kInMaxSheets))
-        req.maxSheets = s->value();
     if (Ptr<ValueCommandInput> v = inputs->itemById(kInSpacing))
         req.partSpacingMm = v->value() * kCmToMm;
     if (Ptr<DropDownCommandInput> d = inputs->itemById(kInRotation))
@@ -450,6 +450,10 @@ class ResultPreviewHandler : public CommandEventHandler {
             // The pitch is the solve's, not the request's: see PreviewSheets.
             PreviewSheets sheets = g_sheets;
             sheets.pitchMm = g_shownInfo.sheet_pitch;
+            // The sheets IN USE, not the kernel's allocation: the allocation is
+            // room to spill into, and drawing six frames for a two-sheet nest
+            // would say the job was bigger than it is.
+            sheets.count = std::max(1, static_cast<int>(g_shownInfo.sheets_used));
             if (!previewBuild(Application::get(), g_lastProfiles, sheets, error)) {
                 logLine("preview build failed: " + error);
                 return;
@@ -634,8 +638,8 @@ bool beginJob(const PendingJob& job, std::string& error) {
     logLine("solve started: " + std::to_string(job.itemCount) + " items, " +
             std::to_string(job.workers) + " workers, " + std::to_string(job.budgetSeconds) +
             " s ceiling, " +
-            (job.sheeted ? std::to_string(job.sheets.max_sheets) + " sheets of " +
-                               std::to_string(static_cast<long>(job.sheets.width)) + " mm"
+            (job.sheeted ? std::to_string(static_cast<long>(job.sheets.width)) +
+                               " mm sheets"
                          : std::string("unbounded strip")));
     return true;
 }
@@ -916,18 +920,16 @@ class ExecuteHandler : public CommandEventHandler {
         // A sheet width of zero is the unbounded strip, so there is nothing to
         // hand the kernel and the whole sheet path stays out of the way.
         pending.sheeted = req.sheetWidthMm > 0.0;
-        pending.previewSheets = PreviewSheets{
-            req.sheetWidthMm,
-            req.sheetHeightMm,
-            0.0,
-            pending.sheeted ? req.maxSheets : 0,
-        };
+        // Pitch and count are both left at zero: they are the solve's to
+        // report, not the request's. See PreviewSheets.
+        pending.previewSheets = PreviewSheets{req.sheetWidthMm, req.sheetHeightMm, 0.0, 0};
         pending.sheets = NkSheets{
             static_cast<float>(req.sheetWidthMm),
             // Gap zero asks the kernel for its default, which is the only place
             // that knows the part spacing it has to clear.
             0.0f,
-            static_cast<std::uint32_t>(req.maxSheets > 0 ? req.maxSheets : 1),
+            // And zero sheets asks it to allocate as many as the parts need.
+            0u,
         };
 
         logLine(std::string("engine busy when the job was ready: ") +
@@ -993,8 +995,6 @@ void restoreSetupValues(const Ptr<CommandInputs>& inputs) {
         v->value(g_saved.sheetHeightMm * kMmToCm);
     if (Ptr<ValueCommandInput> v = inputs->itemById(kInSheetWidth))
         v->value(g_saved.sheetWidthMm * kMmToCm);
-    if (Ptr<IntegerSpinnerCommandInput> sp = inputs->itemById(kInMaxSheets))
-        sp->value(g_saved.maxSheets);
     if (Ptr<ValueCommandInput> v = inputs->itemById(kInSpacing))
         v->value(g_saved.partSpacingMm * kMmToCm);
     if (Ptr<DropDownCommandInput> d = inputs->itemById(kInRotation))
@@ -1141,8 +1141,7 @@ class ValidateHandler : public ValidateInputsEventHandler {
         // Greys out OK rather than failing later with a confusing message.
         // g_setupIssues is read, not recomputed: this fires on every keystroke.
         args->areInputsValid(!req.parts.empty() && req.sheetHeightMm > 0.0 &&
-                             req.sheetWidthMm >= 0.0 && req.maxSheets >= 1 &&
-                             req.partSpacingMm >= 0.0 && g_setupIssues.empty());
+                             req.sheetWidthMm >= 0.0 && req.partSpacingMm >= 0.0 && g_setupIssues.empty());
     }
 };
 
@@ -1194,13 +1193,10 @@ class CreatedHandler : public CommandCreatedEventHandler {
                                       ValueInput::createByReal(2000.0 * kMmToCm))) {
             w->tooltip("Zero nests onto an unbounded strip instead of sheets.");
         }
-        // A ceiling, not a target: the solve reports how many sheets it needed,
-        // and allocating more than that costs only the search space it prunes
-        // away anyway. Raise it when a nest overflows.
-        if (Ptr<IntegerSpinnerCommandInput> ms =
-                inputs->addIntegerSpinnerCommandInput(kInMaxSheets, "Max sheets", 1, 99, 1, 1)) {
-            ms->tooltip("How many sheets the nest may use. The result says how many it did.");
-        }
+        // There is deliberately no sheet COUNT here. A count the user sets is a
+        // count that can bind, and a nest held to too few sheets is solving a
+        // different problem -- see NkSheets. The kernel allocates enough to
+        // spill onto and the result says how many sheets it came to.
         inputs->addValueInput(kInSpacing, "Part spacing", "mm",
                               ValueInput::createByReal(2.0 * kMmToCm));
 

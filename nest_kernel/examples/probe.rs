@@ -8,11 +8,14 @@
 //! (jagua-rs simplifies on import, so the item the solver places is not
 //! necessarily the ring we sent).
 //!
-//! The third argument switches on sheet nesting: `1000x4+10` is four sheets
-//! 1000 units wide with a 10-unit gap between them (`+G` optional). Each placed
-//! part is then reported with the sheet it landed on, and anything that did not
-//! fit on an allocated sheet is called out as overflow -- which is the one thing
-//! about sheet nesting that cannot be checked by eye from a flat solution JSON.
+//! The third argument switches on sheet nesting: `1000` is sheets 1000 units
+//! wide, as many as the kernel decides the parts need, and `1000x4+10` pins the
+//! count at four with a 10-unit gap between them. Pin it only to study the
+//! allocation itself -- the add-in never does, since a count that binds makes the
+//! nest a different problem. Each placed part is then reported with the sheet it
+//! landed on, and anything that did not fit on an allocated sheet is called out
+//! as overflow -- which is the one thing about sheet nesting that cannot be
+//! checked by eye from a flat solution JSON.
 
 use jagua_rs::io::import::Importer;
 use jagua_rs::probs::spp::io::ext_repr::ExtSPInstance;
@@ -71,18 +74,18 @@ impl Terminator for Clock {
     }
 }
 
-/// `WxN` or `WxN+G`: sheet width, sheet count, optional gap.
+/// `W`, `WxN` or `WxN+G`: sheet width, optional sheet count, optional gap. An
+/// omitted count is zero, which is what asks the kernel to allocate.
 fn parse_sheets(arg: &str) -> SheetSpec {
     let (dims, gap) = match arg.split_once('+') {
         Some((d, g)) => (d, g.parse().expect("sheet gap")),
         None => (arg, 0.0),
     };
-    let (width, count) = dims.split_once('x').expect("sheets look like WxN or WxN+G");
-    SheetSpec {
-        width: width.parse().expect("sheet width"),
-        max_sheets: count.parse().expect("sheet count"),
-        gap,
-    }
+    let (width, count) = match dims.split_once('x') {
+        Some((w, n)) => (w, n.parse().expect("sheet count")),
+        None => (dims, 0),
+    };
+    SheetSpec { width: width.parse().expect("sheet width"), max_sheets: count, gap }
 }
 
 fn main() {
@@ -111,7 +114,7 @@ fn main() {
     let sheets = spec.and_then(|spec| SheetStrip::prepare(&mut ext, &spec).expect("sheet spec"));
     if let Some(s) = &sheets {
         eprintln!(
-            "--- sheets: {} x {:.3} wide, pitch {:.3}, span {:.3} ---",
+            "--- sheets: {} allocated x {:.3} wide, pitch {:.3}, span {:.3} ---",
             s.count,
             s.width,
             s.pitch,
@@ -163,7 +166,14 @@ fn main() {
     if let Some(s) = &sheets {
         eprintln!("--- separator is item idx {:?} ---", s.separator_idx);
     }
+    if let Some(init) = &initial {
+        eprintln!(
+            "--- warm start: unresolved collision loss {} ---",
+            nest_kernel::unresolved_collisions(init, locked.clone())
+        );
+    }
 
+    let audit_locked = locked.clone();
     let solution = optimize(
         instance,
         std::mem::replace(&mut rng, Xoshiro256PlusPlus::seed_from_u64(0)),
@@ -175,6 +185,14 @@ fn main() {
         locked,
     )
     .expect("optimize");
+
+    // Quantified, not described: the one check that catches a layout the solver's
+    // own bookkeeping has lost track of. Anything but zero means the solve handed
+    // back parts that overlap each other or a separator.
+    eprintln!(
+        "--- returned layout: unresolved collision loss {} ---",
+        nest_kernel::unresolved_collisions(&solution, audit_locked)
+    );
 
     // The same envelope the add-in writes, so a probe run can be fed straight to
     // tools/plot_nest.py.
