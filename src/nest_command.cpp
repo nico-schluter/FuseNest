@@ -1091,6 +1091,12 @@ class CreatedHandler : public CommandCreatedEventHandler {
             return;
         }
         cmd->okButtonText("Nest");
+        // Switching document tabs pre-empts this command, and isExecutedWhenPreEmpted
+        // defaults to TRUE -- Fusion then fires execute exactly as if OK had been
+        // pressed, so reaching for another tab started a real nest and the result
+        // dialog appeared on the way back. Terminate instead. The result dialog has
+        // carried this line since it was written; the setup dialog never got it.
+        cmd->isExecutedWhenPreEmpted(false);
         // A verdict from the previous dialog must not gate this one's OK button
         // before activate has had a chance to recompute it.
         g_setupIssues.clear();
