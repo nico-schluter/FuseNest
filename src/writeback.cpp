@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <initializer_list>
 #include <iomanip>
 #include <sstream>
 #include <vector>
@@ -38,12 +37,13 @@ Ptr<Matrix3D> toMatrix3D(const Mat4& m) {
 /// Where a placement's move feature has to be created, and the matrix it needs
 /// once it is there.
 struct MoveTarget {
-    /// The NATIVE body. A proxy cannot carry a move feature, and the feature
-    /// belongs to the component that actually owns the geometry.
+    /// The body to move. Native, necessarily: a proxy cannot carry a move
+    /// feature, and the feature belongs to the component owning the geometry.
     Ptr<BRepBody> body;
-    /// That component's, which is not necessarily the root's.
+    /// That component's collection, which is the root's for every unit that
+    /// reaches here today.
     Ptr<MoveFeatures> moves;
-    /// `rootMatrix` as seen from inside that component.
+    /// The placement, in the space the move feature will resolve it in.
     Ptr<Matrix3D> matrix;
     /// Non-empty when the placement cannot be applied; the caller reports it
     /// verbatim after the profile name.
@@ -64,24 +64,15 @@ std::string describeMat4(const Mat4& m) {
     return os.str();
 }
 
-std::string describeBox(const Ptr<BoundingBox3D>& box) {
-    Ptr<Point3D> lo = box ? box->minPoint() : nullptr;
-    Ptr<Point3D> hi = box ? box->maxPoint() : nullptr;
-    if (!lo || !hi) return "(none)";
-
-    std::ostringstream os;
-    os << std::fixed << std::setprecision(3) << "(" << lo->x() << ", " << lo->y() << ", "
-       << lo->z() << ") .. (" << hi->x() << ", " << hi->y() << ", " << hi->z() << ")";
-    return os.str();
-}
-
 /// Confirms that Matrix3D::asArray is laid out the way `toMat4` assumes.
 ///
 /// Everything here reads a Matrix3D as 16 ROW-MAJOR cells, so a translation
-/// lands at indices 3, 7 and 11. If Fusion ever handed back column-major cells
-/// instead, a single conjugation would still come out right often enough to
-/// look fine, while a composed chain would not -- so the assumption is checked
-/// rather than trusted. Logged once per write-back; it costs one matrix.
+/// lands at indices 3, 7 and 11. Read the wrong way round, an instance's
+/// re-seated transform comes out transposed in its rotation and with the
+/// translation in the wrong cells -- which is a rigid transform too, so the
+/// part lands somewhere plausible rather than failing. Hence the assumption is
+/// checked rather than trusted. Logged once per write-back; it costs one
+/// matrix.
 void logMatrixLayout() {
     Ptr<Matrix3D> probe = Matrix3D::create();
     if (!probe || !probe->translation(Vector3D::create(1.0, 2.0, 3.0))) {
@@ -99,168 +90,49 @@ void logMatrixLayout() {
             " " + describeMat4(cells));
 }
 
-/// The transform from a body's own component space into ROOT space.
+/// Finds the component that can carry the move for a root body.
 ///
-/// `transform2` is documented as the occurrence's position "in its assembly
-/// context", and for a nested occurrence that context is its PARENT occurrence,
-/// not the root -- `assemblyContext()` returns exactly that parent, or null once
-/// the occurrence is native. So one `transform2` is only the whole story at
-/// depth one; deeper, the chain has to be composed. Reading just the leaf is
-/// the bug this function exists to avoid, and it is invisible at depth one,
-/// which is why it survived the first round of testing.
+/// Thin, and deliberately so: a body unit is always native to the component
+/// being modelled, so the placement is already in the space the move feature
+/// resolves its matrix in and goes through untouched. What this used to do
+/// instead is worth knowing, because the shape of the problem has not changed
+/// -- only who solves it. A body picked inside a component projected in
+/// ASSEMBLY context, so the placement was a motion in root space, while the
+/// move feature acted on the native body and resolved its matrix in that
+/// body's OWN component; handing the root-space matrix over unchanged stacked
+/// it on top of the occurrence transform and put the part somewhere plausible
+/// and wrong. The conjugate T^-1 * M * T fixed it. Resolving the body to its
+/// instance removes the question: the instance IS in root space.
 ///
-/// Walking leaf-first, each enclosing transform multiplies on the LEFT, since
-/// an outer frame is applied after the inner one.
-Mat4 occurrenceFrame(const Ptr<Occurrence>& leaf) {
-    Mat4 frame = identity4();
-    for (Ptr<Occurrence> occ = leaf; occ; occ = occ->assemblyContext())
-        frame = multiply4(toMat4(occ->transform2()), frame);
-    return frame;
-}
-
-/// Checks a frame against the model instead of trusting it.
-///
-/// `frame` claims to carry the native body onto the proxy the outline was
-/// projected from, so the check is to do exactly that -- copy the native body,
-/// transform the copy, and compare where it lands with where the proxy already
-/// is. A composed-wrong frame is off by an enclosing occurrence's transform,
-/// which is centimetres, so this separates right from wrong by a wide margin.
-///
-/// Bounding boxes are compared rather than vertices because they need no
-/// assumption about topology ordering surviving the copy, and the copy is
-/// transformed as GEOMETRY rather than as eight corner points -- the axis
-/// aligned box of a rotated body is not the box of its rotated corners.
-///
-/// This is deliberately always on, not a verbose-only diagnostic. The whole
-/// placement rests on a property of the Fusion API that the docs state in one
-/// clause, and a misread there does not fail loudly -- it puts the part
-/// somewhere plausible. Cheaper to measure it than to be sure.
-bool frameAgreesWithGeometry(const Ptr<BRepBody>& native, const Ptr<BRepBody>& proxy,
-                             const Ptr<Matrix3D>& frame, double& errorCm, std::string& detail) {
-    errorCm = 0.0;
-
-    Ptr<TemporaryBRepManager> mgr = TemporaryBRepManager::get();
-    Ptr<BRepBody> copy = mgr ? mgr->copy(native) : nullptr;
-    if (!copy || !mgr->transform(copy, frame)) {
-        detail = "could not copy and transform the native body";
-        return false;
-    }
-
-    Ptr<BoundingBox3D> moved = copy->boundingBox();
-    Ptr<BoundingBox3D> expected = proxy ? proxy->boundingBox() : nullptr;
-    // Three boxes, because which PAIR disagrees says what is wrong. Predicted
-    // matching the proxy is the pass. Predicted matching the native's own box
-    // instead means the proxy box came back in local space and the check, not
-    // the frame, is at fault. Neither matching means the frame is wrong.
-    detail = "native " + describeBox(native ? native->boundingBox() : nullptr) + ", predicted " +
-             describeBox(moved) + ", proxy " + describeBox(expected);
-    if (!moved || !expected) return false;
-
-    const Ptr<Point3D> corners[4] = {moved->minPoint(), moved->maxPoint(), expected->minPoint(),
-                                     expected->maxPoint()};
-    for (const Ptr<Point3D>& c : corners)
-        if (!c) return false;
-
-    errorCm = std::max({std::fabs(corners[0]->x() - corners[2]->x()),
-                        std::fabs(corners[0]->y() - corners[2]->y()),
-                        std::fabs(corners[0]->z() - corners[2]->z()),
-                        std::fabs(corners[1]->x() - corners[3]->x()),
-                        std::fabs(corners[1]->y() - corners[3]->y()),
-                        std::fabs(corners[1]->z() - corners[3]->z())});
-
-    // One micron. Far below any real mismatch -- an enclosing transform left out
-    // is centimetres -- and far above the noise between a BRep box and the box
-    // of a transformed copy of the same BRep.
-    return errorCm <= 1.0e-4;
-}
-
-/// Resolves a selected body -- which may be a proxy inside an occurrence -- to
-/// the component that can carry the move, and re-expresses the placement there.
-///
-/// This is the whole reason a body inside a component used to land in the wrong
-/// place. The outline was projected in ASSEMBLY context, so the solver's
-/// placement is a motion in root space; a move feature, however, acts on the
-/// native body and resolves its matrix in that body's OWN component. Handing
-/// the root-space matrix over unchanged stacks it on top of the occurrence
-/// transform. The conjugate T^-1 * M * T is the same rigid motion viewed from
-/// inside the component, so the body ends up where the layout says.
-///
-/// A root-level body has no assembly context, its frame is the identity, and
-/// conjugation leaves the matrix bit-for-bit alone -- the path that already
-/// worked is not perturbed.
-///
-/// NOTE, since the conjugation is the interesting half and is now unreachable:
-/// classification resolves every body inside a component to its INSTANCE, so a
-/// body unit always arrives context-free and `frame` is always the identity.
-/// The branch is kept because it is the general answer to "move this body,
-/// wherever it lives", it is covered by transform4_test, and the moment a
-/// deeper unit becomes nestable -- a body inside an instance that is itself
-/// placed once, say -- it is the code that does it. It is not load-bearing
-/// today, and a reader should not conclude from its presence that the
-/// body-in-component path is live.
+/// So the assembly case is refused here rather than handled. It is unreachable
+/// -- classification sends every body inside a component to its instance -- and
+/// a refusal is the right residue of an invariant: if one ever did arrive, the
+/// move would silently drag every other instance of that component along with
+/// it, which is the whole reason the instance unit exists.
 MoveTarget resolveMoveTarget(const Ptr<BRepBody>& selected, const Ptr<Matrix3D>& rootMatrix) {
     MoveTarget target;
 
-    Ptr<Occurrence> context = selected ? selected->assemblyContext() : nullptr;
-    target.body = context ? selected->nativeObject() : selected;
-    if (!target.body) {
-        target.error = "has no native body to move";
+    if (!selected) {
+        target.error = "has no body to move";
+        return target;
+    }
+    if (selected->assemblyContext()) {
+        target.error = "is inside a component, so moving it would move it in every instance; "
+                       "its instance should have been nested instead";
         return target;
     }
 
-    Ptr<Component> owner = target.body->parentComponent();
+    Ptr<Component> owner = selected->parentComponent();
     target.moves = owner && owner->features() ? owner->features()->moveFeatures() : nullptr;
     if (!target.moves) {
         target.error = "its component has no move features";
         return target;
     }
 
-    if (!context) {
-        target.matrix = rootMatrix;
-        return target;
-    }
-
-    const Mat4 frame = occurrenceFrame(context);
-
-    Ptr<Matrix3D> frameMatrix = toMatrix3D(frame);
-    double errorCm = 0.0;
-    std::string detail;
-    if (!frameMatrix ||
-        !frameAgreesWithGeometry(target.body, selected, frameMatrix, errorCm, detail)) {
-        std::ostringstream os;
-        os << "its position inside the assembly could not be confirmed (off by " << errorCm
-           << " cm), so the placement is not applied";
-        target.error = os.str();
-
-        // Everything needed to tell a wrong frame from a wrong check, in one
-        // run: the whole chain level by level, the frame it composed to, and
-        // the three boxes.
-        logLine("writeback: frame check FAILED for " + context->fullPathName() + "/" +
-                selected->name() + ", error " + std::to_string(errorCm) + " cm");
-        for (Ptr<Occurrence> occ = context; occ; occ = occ->assemblyContext())
-            logLine("  level " + occ->fullPathName() + " transform2 " +
-                    describeMat4(toMat4(occ->transform2())));
-        logLine("  composed frame " + describeMat4(frame));
-        logLine("  " + detail);
-        return target;
-    }
-
-    Mat4 local{};
-    if (!conjugate4(toMat4(rootMatrix), frame, local)) {
-        // Only reachable for a non-rigid frame, which Fusion should not
-        // produce. Refused rather than approximated: the transpose shortcut
-        // would be silently wrong and the part would move somewhere nobody
-        // asked for.
-        target.error = "its occurrence transform is not rigid, so the placement cannot be "
-                       "expressed inside the component";
-        return target;
-    }
-
-    target.matrix = toMatrix3D(local);
-    if (!target.matrix) target.error = "could not express the placement inside its component";
+    target.body = selected;
+    target.matrix = rootMatrix;
     return target;
 }
-
 
 /// Deletes every constraint in one of an occurrence's constraint lists.
 ///

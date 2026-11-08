@@ -582,10 +582,8 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
             //
             // The hiding below moved for the same reason, one iteration
             // earlier. Hiding in commandCreated worked and saved 85% of the
-            // preview cost -- 100 bodies once
-            // worked and saved 85% of the preview cost -- 100 bodies once
-            // instead of 100 twenty times, confirmed by the hide counter going
-            // to first 0 / last 0. But it is a document write outside any
+            // preview cost -- 100 bodies once instead of 100 twenty times,
+            // confirmed by the hide counter going to first 0 / last 0. But it is a document write outside any
             // transaction, which Autodesk warns against, and intermittent
             // crashes appeared in the same three iterations that introduced it
             // here and the matching restore in destroy.
@@ -1026,9 +1024,9 @@ void restoreSetupValues(const Ptr<CommandInputs>& inputs) {
 /// Reselects what the last job was given, by token.
 ///
 /// Only when coming back from the result dialog. A token that fails to resolve
-/// means that body or component is gone, which is worth saying out loud -- it is the one way
-/// the handoff can lose work, and silence would look like the nest shrinking
-/// for no reason.
+/// means that body or component is gone, which is worth saying out loud -- it
+/// is the one way the handoff can lose work, and silence would look like the
+/// nest shrinking for no reason.
 void restoreSetupSelections(const Ptr<CommandInputs>& inputs) {
     if (!g_restoreSelections || !g_saved.valid || !inputs) return;
     g_restoreSelections = false;

@@ -1,11 +1,16 @@
-// Checks the conjugation write-back depends on, stated as where it sends points.
+// Checks the composition write-back depends on, stated as where it sends points.
 //
-// The property that matters is a round trip: taking a point into root space,
-// moving it there, and coming back must land where the conjugated motion sends
-// it directly. That is the whole claim the fix rests on, and it also pins the
-// multiply ORDER -- the order this file would still pass with reversed is the
-// one where frame and motion commute, so the tests below deliberately use a
-// frame and a motion that do not.
+// Moving a component instance means re-seating its transform: the instance sits
+// at T, the solver asks for a motion M in root space, and the new transform is
+// M * T. The property that matters is that the body inside then lands exactly
+// where applying M to its old root position would put it -- and that pins the
+// multiply ORDER, which is the one thing here that can be wrong while looking
+// right. T * M is a rigid transform too, and it puts the part somewhere
+// plausible.
+//
+// So every test below uses a frame and a motion that do NOT commute. Reversed
+// multiplication passes trivially on the cases where they do, which is why a
+// rotation-free component or an offset-free motion proves nothing.
 #include "transform4.h"
 
 #include <cmath>
@@ -25,7 +30,9 @@ void check(bool ok, const char* what) {
 bool near(double a, double b, double eps = 1e-9) { return std::fabs(a - b) <= eps; }
 
 /// Rotation about Z by `deg`, then a translation -- the same shape as
-/// placementMatrix, which is the only kind of motion the solver produces.
+/// placementMatrix, which is the only kind of motion the solver produces, and
+/// the same shape as an occurrence transform that has only ever been moved in
+/// the plane.
 Mat4 motionZ(double deg, double tx, double ty) {
     const double r = deg * M_PI / 180.0;
     const double c = std::cos(r), s = std::sin(r);
@@ -48,102 +55,60 @@ bool samePoint(P a, P b, double eps = 1e-9) {
     return near(a.x, b.x, eps) && near(a.y, b.y, eps) && near(a.z, b.z, eps);
 }
 
-void roundTripHolds(const char* what, const Mat4& frame, const Mat4& motion, P local) {
-    Mat4 conjugated{};
-    if (!conjugate4(motion, frame, conjugated)) {
-        check(false, what);
-        return;
-    }
-    // Moved inside the component, then viewed from the root...
-    const P viaLocal = sent(frame, sent(conjugated, local));
-    // ...must match being viewed from the root, then moved there.
-    const P viaRoot = sent(motion, sent(frame, local));
-    check(samePoint(viaLocal, viaRoot), what);
+/// The instance claim: a point of the component, carried into root space by the
+/// RE-SEATED transform, lands where the motion sends the point's old root
+/// position. `local` is in the component's own space, which is where its bodies
+/// are defined.
+void placementHolds(const char* what, const Mat4& frame, const Mat4& motion, P local) {
+    const Mat4 reseated = multiply4(motion, frame);
+    check(samePoint(sent(reseated, local), sent(motion, sent(frame, local))), what);
 }
 
 }  // namespace
 
 int main() {
-    const Mat4 id = identity4();
-
-    // A component that is rotated as well as offset: with a frame like this a
-    // reversed conjugation produces a plausible but wrong answer, which is
-    // exactly the failure mode the live bug had.
-    const Mat4 tilted = multiply4(motionZ(30.0, 100.0, -40.0), identity4());
+    // A component that is rotated as well as offset. With a frame like this,
+    // composing the other way round produces a plausible but wrong answer --
+    // the failure this file exists to catch.
+    const Mat4 tilted = motionZ(30.0, 100.0, -40.0);
     const Mat4 move = motionZ(90.0, 250.0, 10.0);
 
-    roundTripHolds("round trip: tilted frame, rotate and translate", tilted, move, P{7, 3, 2});
-    roundTripHolds("round trip: tilted frame, pure translation", tilted, motionZ(0.0, 5.0, 0.0),
+    placementHolds("re-seating: tilted instance, rotate and translate", tilted, move, P{7, 3, 2});
+    placementHolds("re-seating: tilted instance, pure translation", tilted, motionZ(0.0, 5.0, 0.0),
                    P{-2, 11, 0});
-    roundTripHolds("round trip: offset-only frame", motionZ(0.0, 60.0, 60.0), move, P{1, 1, 1});
-    roundTripHolds("round trip: identity frame", id, move, P{4, 5, 6});
+    placementHolds("re-seating: offset-only instance", motionZ(0.0, 60.0, 60.0), move, P{1, 1, 1});
+    placementHolds("re-seating: instance at the origin", identity4(), move, P{4, 5, 6});
 
-    // A body in the root component must be left exactly as it was: this is the
-    // path that already worked, and the fix must not perturb it.
+    // An instance sitting at the identity must be moved by the placement
+    // itself, bit for bit: that is the case where the component's own space IS
+    // root space, and anything but equality means the composition is adding
+    // something of its own.
     {
-        Mat4 out{};
-        const bool ok = conjugate4(move, id, out);
-        check(ok && out == move, "identity frame leaves the motion untouched");
+        const Mat4 reseated = multiply4(move, identity4());
+        check(reseated == move, "an instance at the identity takes the placement unchanged");
     }
 
-    // The bug, stated directly. A pure +X translation inside a component turned
-    // 90 degrees has to become a translation along the component's own -Y, or
-    // the part slides the wrong way.
+    // The order, stated as the thing that goes wrong. Reversing it is not a
+    // small error: the same +X placement on a component turned 90 degrees ends
+    // up 250mm along the component's own Y instead of the root's X.
     {
-        Mat4 out{};
-        const bool ok = conjugate4(motionZ(0.0, 10.0, 0.0), motionZ(90.0, 0.0, 0.0), out);
-        const P p = sent(out, P{0, 0, 0});
-        check(ok && samePoint(p, P{0, -10, 0}), "a root +X move becomes -Y inside a turned component");
+        const Mat4 turned = motionZ(90.0, 0.0, 0.0);
+        const P origin{0, 0, 0};
+        check(samePoint(sent(multiply4(move, turned), origin), P{250, 10, 0}),
+              "placement * transform moves the instance in ROOT space");
+        check(!samePoint(sent(multiply4(turned, move), origin), P{250, 10, 0}),
+              "transform * placement moves it somewhere else");
     }
 
+    // Composition is associative and multiply4 has to be: write-back composes
+    // once per instance, but a second nest re-seats an already re-seated
+    // transform, and two placements applied in turn must equal their product.
     {
-        Mat4 inverse{};
-        const bool ok = rigidInverse4(tilted, inverse);
-        const P there_and_back = sent(multiply4(tilted, inverse), P{3, 4, 5});
-        check(ok && samePoint(there_and_back, P{3, 4, 5}), "rigid inverse undoes the frame");
-    }
-
-    // Refused rather than approximated: a non-rigid frame would make the
-    // transpose shortcut silently wrong.
-    {
-        Mat4 scaled = identity4();
-        scaled[0] = 2.0;
-        Mat4 out{};
-        check(!isRigid4(scaled) && !conjugate4(move, scaled, out), "a scaled frame is refused");
-
-        Mat4 sheared = identity4();
-        sheared[1] = 0.5;
-        check(!isRigid4(sheared), "a sheared frame is refused");
-    }
-
-    // Mirrored frames are allowed on purpose -- orthogonal with determinant -1,
-    // which the transpose still inverts exactly.
-    {
-        Mat4 mirrored = identity4();
-        mirrored[0] = -1.0;
-        check(isRigid4(mirrored), "a mirrored frame is accepted");
-        roundTripHolds("round trip: mirrored frame", mirrored, move, P{2, 9, 1});
-    }
-
-    // The nesting bug, as maths. occurrenceFrame walks leaf-first and
-    // left-multiplies each enclosing transform; this is that loop, checked
-    // against applying the two frames one after the other by hand. Reading only
-    // the leaf -- the original mistake -- lands the point somewhere else
-    // entirely, which the second check pins down.
-    {
-        const Mat4 outer = motionZ(25.0, 300.0, 0.0);   // component A under the root
-        const Mat4 inner = motionZ(-40.0, 0.0, 80.0);   // component B inside A
-
-        Mat4 chain = identity4();
-        for (const Mat4& t : {inner, outer}) chain = multiply4(t, chain);
-
+        const Mat4 second = motionZ(-15.0, -30.0, 12.0);
         const P local{6, -2, 3};
-        check(samePoint(sent(chain, local), sent(outer, sent(inner, local))),
-              "a two-level chain composes leaf-first");
-        check(!samePoint(sent(inner, local), sent(chain, local)),
-              "the leaf transform alone is not the chain");
-
-        roundTripHolds("round trip: two-level chain", chain, move, local);
+        check(samePoint(sent(multiply4(second, multiply4(move, tilted)), local),
+                        sent(second, sent(move, sent(tilted, local)))),
+              "two placements in turn equal their composition");
     }
 
     std::printf(g_failures ? "\n%d failure(s)\n" : "\nall passed\n", g_failures);
