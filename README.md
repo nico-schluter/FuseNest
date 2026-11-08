@@ -17,6 +17,8 @@ src/                  pure source; nothing in here ships
   solver_input.{h,cpp}  outlines -> the JSON instance sparrow consumes
   solver.{h,cpp}        runs the kernel off-thread, returns via CustomEvent
   nest_kernel.h         hand-written C ABI for the Rust side
+  writeback.{h,cpp}     placements -> Fusion move features
+  transform4.{h,cpp}    4x4 rigid maths, Fusion-free so it can be unit tested
   log.{h,cpp}           file logging (a GUI process has no stdout)
 nest_kernel/          Rust staticlib wrapping sparrow
   src/sheets.rs         sheet nesting on top of a strip packer
@@ -24,6 +26,7 @@ vendor/sparrow/       our fork of sparrow; UPSTREAM.md records every patch
 packaging/            the non-code parts of the deliverable
   FuseNest.manifest     source of truth; staged into dist/ by CMake
   AddInIcon.svg
+tests/                what can be checked without Fusion
 tools/plot_nest.py    renders AND geometrically verifies a solution
 dist/FuseNest/        GENERATED -- the add-in itself. Point Fusion here.
 CMakeLists.txt        source of truth for the build

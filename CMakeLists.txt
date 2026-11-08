@@ -65,6 +65,7 @@ add_library(${ADDIN_NAME} SHARED
     src/solver.cpp
     src/solver_input.cpp
     src/timing.cpp
+    src/transform4.cpp
     src/triangulate.cpp
     src/writeback.cpp
 )
@@ -211,8 +212,16 @@ add_executable(triangulate_test EXCLUDE_FROM_ALL
 target_include_directories(triangulate_test PRIVATE src)
 target_compile_features(triangulate_test PRIVATE cxx_std_17)
 
+add_executable(transform4_test EXCLUDE_FROM_ALL
+    tests/transform4_test.cpp
+    src/transform4.cpp
+)
+target_include_directories(transform4_test PRIVATE src)
+target_compile_features(transform4_test PRIVATE cxx_std_17)
+
 add_custom_target(run-tests
     COMMAND triangulate_test
-    DEPENDS triangulate_test
+    COMMAND transform4_test
+    DEPENDS triangulate_test transform4_test
     COMMENT "Running geometry tests"
 )

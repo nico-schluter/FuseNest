@@ -62,11 +62,11 @@ std::vector<Profile> g_lastProfiles;
 /// and nothing from the request survives to it otherwise.
 PreviewSheets g_sheets;
 
-/// Bodies the setup dialog has judged unnestable, refreshed whenever the
+/// Selections the setup dialog has judged unnestable, refreshed whenever the
 /// selection changes. Held rather than recomputed because validateInputs fires
 /// far more often than the selection changes, and each recompute projects every
-/// selected body.
-std::vector<BodyIssue> g_setupIssues;
+/// selected unit.
+std::vector<NestIssue> g_setupIssues;
 
 /// What command 1 found, so the result dialog can show it instead of the
 /// message box that used to carry it.
@@ -354,16 +354,20 @@ void rememberSetup(const Ptr<CommandInputs>& inputs, const NestRequest& req) {
         if (Ptr<ListItem> item = d->selectedItem()) g_saved.rotationIndex = item->index();
 
     for (const Ptr<Base>& e : req.parts) {
-        // Tokens live on the concrete type, not on Base. Only solid bodies can
-        // be selected, so this is the only cast needed.
-        if (Ptr<BRepBody> body = e ? e->cast<BRepBody>() : nullptr) {
-            const std::string token = body->entityToken();
-            if (!token.empty()) g_saved.partTokens.push_back(token);
-        }
+        // Tokens live on the concrete type, not on Base, and the filter admits
+        // two of them -- so both are tried. The selection is remembered as the
+        // user made it, bodies and components alike, rather than as the units
+        // it resolved to: reopening the dialog should put back what they picked.
+        std::string token;
+        if (Ptr<BRepBody> body = e ? e->cast<BRepBody>() : nullptr)
+            token = body->entityToken();
+        else if (Ptr<Occurrence> occ = e ? e->cast<Occurrence>() : nullptr)
+            token = occ->entityToken();
+        if (!token.empty()) g_saved.partTokens.push_back(token);
     }
     g_saved.valid = true;
     logLine("remembered setup: " + std::to_string(g_saved.partTokens.size()) + " of " +
-            std::to_string(req.parts.size()) + " parts tokenised");
+            std::to_string(req.parts.size()) + " selections tokenised");
 }
 
 NestRequest readInputs(const Ptr<CommandInputs>& inputs) {
@@ -411,12 +415,22 @@ class ResultExecuteHandler : public CommandEventHandler {
 
         const WriteBackResult wb = applyPlacements(app, g_lastProfiles, g_shown);
         logLine("applied: " + std::to_string(wb.moved) + " moved, " +
-                std::to_string(wb.skipped) + " skipped");
+                std::to_string(wb.skipped) + " skipped, " +
+                std::to_string(wb.constraintsBroken) + " constraints broken");
         for (const auto& w : wb.warnings) logLine("writeback warning: " + w);
 
-        if (!wb.warnings.empty() && ui) {
+        // Broken constraints get the dialog to themselves if nothing else went
+        // wrong. Deleting joints is the one thing Apply does that the user did
+        // not ask for in so many words, and finding out later by noticing a
+        // joint is gone would be indefensible. Undo covers it, which is why the
+        // message says so rather than asking first.
+        if ((!wb.warnings.empty() || wb.constraintsBroken) && ui) {
             std::ostringstream os;
             os << "Applied " << wb.moved << " of " << (wb.moved + wb.skipped) << " parts.\n\n";
+            if (wb.constraintsBroken)
+                os << "Released " << wb.constraintsBroken
+                   << " joint(s), rigid group(s) or grounded component(s) that would have held "
+                      "parts out of the layout. Undo restores them along with the moves.\n";
             for (const auto& w : wb.warnings) os << "  - " << w << "\n";
             ui->messageBox(os.str(), "FuseNest");
         }
@@ -885,8 +899,8 @@ class ExecuteHandler : public CommandEventHandler {
         // Everything command 1 learned, carried into the result dialog rather
         // than thrown at a message box the user has to dismiss before working.
         std::ostringstream job;
-        job << "<b>" << input.itemCount << " parts</b> from " << extracted.bodiesExamined
-            << " bodies &middot; " << totalPoints << " points<br/>"
+        job << "<b>" << input.itemCount << " parts</b> from " << extracted.unitsExamined
+            << " bodies and components &middot; " << totalPoints << " points<br/>"
             << static_cast<long>(totalAreaMm2) << " mm&sup2; total";
         if (approximated)
             job << "<br/>" << approximated << " of " << extracted.profiles.size()
@@ -1009,10 +1023,10 @@ void restoreSetupValues(const Ptr<CommandInputs>& inputs) {
         b->value(g_saved.verboseLog);
 }
 
-/// Reselects the bodies the last job used, by token.
+/// Reselects what the last job was given, by token.
 ///
 /// Only when coming back from the result dialog. A token that fails to resolve
-/// means the body is gone, which is worth saying out loud -- it is the one way
+/// means that body or component is gone, which is worth saying out loud -- it is the one way
 /// the handoff can lose work, and silence would look like the nest shrinking
 /// for no reason.
 void restoreSetupSelections(const Ptr<CommandInputs>& inputs) {
@@ -1040,15 +1054,15 @@ void restoreSetupSelections(const Ptr<CommandInputs>& inputs) {
     }
 
     logLine("restored " + std::to_string(restored) + " of " +
-            std::to_string(g_saved.partTokens.size()) + " parts" +
+            std::to_string(g_saved.partTokens.size()) + " selections" +
             (missing ? ", " + std::to_string(missing) + " no longer exist" : "") +
             (ambiguous ? ", " + std::to_string(ambiguous) + " resolved to several entities" : ""));
 
     if (missing && app)
         if (Ptr<UserInterface> ui = app->userInterface())
             ui->messageBox(std::to_string(missing) +
-                               " of the previously selected bodies no longer exist and could "
-                               "not be reselected.",
+                               " of the previously selected bodies and components no longer "
+                               "exist and could not be reselected.",
                            "FuseNest");
 }
 
@@ -1060,7 +1074,7 @@ void restoreSetupSelections(const Ptr<CommandInputs>& inputs) {
 /// -- and the reason for each is in the log, written by refreshSetupIssues.
 /// Beyond three names the list is abbreviated rather than wrapped: a paragraph
 /// of names in a scrolling box is less readable than a count.
-std::string issuesHtml(const std::vector<BodyIssue>& issues) {
+std::string issuesHtml(const std::vector<NestIssue>& issues) {
     if (issues.empty()) return "";
 
     const size_t shown = issues.size() <= 3 ? issues.size() : 2;
@@ -1072,7 +1086,13 @@ std::string issuesHtml(const std::vector<BodyIssue>& issues) {
         os << "<b>" << issues[i].name << "</b>";
     }
     if (shown < issues.size()) os << " and " << (issues.size() - shown) << " more";
-    os << " produced invalid geometry.</div>";
+    // "cannot be nested" rather than anything about geometry: not every blocker
+    // is a geometry problem. A component with two bodies in it has a perfectly
+    // good outline and is refused over its structure. Saying which kind each
+    // one is needs a line per kind, which is the grouping the mode dropdown
+    // brings with it; until then the shared sentence has to be one that is true
+    // of all of them.
+    os << " cannot be nested.</div>";
     return os.str();
 }
 
@@ -1089,7 +1109,7 @@ void refreshSetupIssues(const Ptr<CommandInputs>& inputs) {
     // carry it -- execute calls timingReset() before anything is reported -- so
     // the cost of the live check only exists if it is written down here.
     const auto t0 = std::chrono::steady_clock::now();
-    g_setupIssues = validateBodies(Application::get(), req.parts);
+    g_setupIssues = validateSelections(Application::get(), req.parts);
     const double ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     logLine("setup check: " + std::to_string(req.parts.size()) + " selections in " +
@@ -1170,13 +1190,19 @@ class CreatedHandler : public CommandCreatedEventHandler {
             return;
         }
 
-        Ptr<SelectionCommandInput> sel =
-            inputs->addSelectionInput(kInParts, "Parts", "Select bodies to nest");
+        Ptr<SelectionCommandInput> sel = inputs->addSelectionInput(
+            kInParts, "Parts", "Select bodies or components to nest");
         if (sel) {
-            // Solid bodies only. Surface bodies have no thickness, so a projected
-            // outline is meaningless for nesting, and occurrence selection is
-            // deferred until the per-body edge cases are worked through.
+            // Solid bodies and component instances. Surface bodies are excluded
+            // because they have no thickness, so a projected outline says
+            // nothing about material consumption.
+            //
+            // The two filters overlap on purpose: a body inside a component can
+            // be picked either way, and both routes resolve to the instance
+            // (see WHAT MOVES in profile.h). Picking a component AND the body
+            // in it is one unit, not two.
             sel->addSelectionFilter("SolidBodies");
+            sel->addSelectionFilter("Occurrences");
             sel->setSelectionLimits(1, 0);  // at least one, no upper bound
         }
 

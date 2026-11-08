@@ -92,6 +92,12 @@ int previewShow(const std::vector<NkPlacement>& placements);
 /// Hides the real bodies so the graphics are not drawn over unmoved originals,
 /// and puts them back on the way out.
 ///
+/// Always the body, never the instance, even for a profile that moves as a
+/// component: an instance is only nestable with exactly one body in it, so
+/// hiding that body hides all of it, and the body proxy's light bulb is
+/// per-occurrence -- hiding it leaves the other instances of the same component
+/// visible, which is what someone nesting one of them expects to see.
+///
 /// Re-done every pass, because visibility is a document change and Fusion's
 /// rollback makes the bodies visible again before each regeneration. Returns
 /// how many bodies actually changed.
