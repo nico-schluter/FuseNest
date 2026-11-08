@@ -233,7 +233,13 @@ int releaseInstance(const Ptr<Occurrence>& occ, std::vector<std::string>& warnin
 /// transform is placement * current. This is also why the instance path needs
 /// no conjugation -- the placement is already in the space the transform lands
 /// in, which is the thing the body path has to work for.
-bool moveInstance(const Ptr<Occurrence>& occ, const Ptr<Matrix3D>& rootMatrix,
+///
+/// `confirm` re-reads the transform and checks that the occurrence took it. Only
+/// for a DIRECT design: there the transform is the model, so what comes back is
+/// what the instance now carries. In a parametric design the write is a pending
+/// position until the snapshot at the end of applyPlacements, so a read-back
+/// would be asking a question the design has not yet answered.
+bool moveInstance(const Ptr<Occurrence>& occ, const Ptr<Matrix3D>& rootMatrix, bool confirm,
                   std::string& error) {
     Ptr<Matrix3D> current = occ ? occ->transform2() : nullptr;
     if (!current) {
@@ -241,7 +247,8 @@ bool moveInstance(const Ptr<Occurrence>& occ, const Ptr<Matrix3D>& rootMatrix,
         return false;
     }
 
-    Ptr<Matrix3D> next = toMatrix3D(multiply4(toMat4(rootMatrix), toMat4(current)));
+    const Mat4 wanted = multiply4(toMat4(rootMatrix), toMat4(current));
+    Ptr<Matrix3D> next = toMatrix3D(wanted);
     if (!next) {
         error = "could not compose its new position";
         return false;
@@ -249,6 +256,18 @@ bool moveInstance(const Ptr<Occurrence>& occ, const Ptr<Matrix3D>& rootMatrix,
     if (!occ->transform2(next)) {
         error = "Fusion refused to move the instance; something is still holding it in place";
         return false;
+    }
+
+    if (confirm) {
+        Ptr<Matrix3D> seated = occ->transform2();
+        // 1e-6 cm is ten nanometres: far below anything a layout cares about,
+        // and far above the rounding a matrix survives on its way through
+        // Fusion. The question being asked is whether the position took at all.
+        if (!seated || !approxEqual4(toMat4(seated), wanted, 1e-6)) {
+            error = "Fusion accepted the new position but the instance did not take it; "
+                    "something is still holding it in place";
+            return false;
+        }
     }
     return true;
 }
@@ -360,7 +379,7 @@ WriteBackResult applyPlacements(const Ptr<Application>& app, const std::vector<P
         if (instance) {
             ScopedTime _t("writeback.moveInstance");
             std::string error;
-            if (!moveInstance(instance, m, error)) {
+            if (!moveInstance(instance, m, /*confirm=*/!parametric, error)) {
                 result.warnings.push_back(profile.name + ": " + error);
                 ++result.skipped;
                 continue;
@@ -406,14 +425,24 @@ WriteBackResult applyPlacements(const Ptr<Application>& app, const std::vector<P
             continue;
         }
 
-        bool added = false;
+        Ptr<MoveFeature> feature;
         {
             // The prime suspect: in a parametric design every move feature is a
             // timeline entry, and adding one can recompute.
             ScopedTime _t("writeback.movesAdd");
-            added = target.moves->add(input);
+            feature = target.moves->add(input);
         }
-        if (!added) {
+        // A null return only means failure in a PARAMETRIC design. `add` is
+        // documented to return "nothing in the case where the feature is
+        // non-parametric": direct modelling has no timeline to hold a feature,
+        // so the move is applied to the geometry and there is no feature to hand
+        // back. Reading that null as a failure is what made a direct-mode apply
+        // report every part skipped -- "move failed ()", with an empty
+        // getLastError because nothing had in fact gone wrong -- while the
+        // bodies had moved. The success of the operation itself is established
+        // before this point: createInput2 vetted the entities and
+        // defineAsFreeMove vetted the matrix, and both are checked above.
+        if (!feature && parametric) {
             std::string err;
             app->getLastError(&err);
             result.warnings.push_back(profile.name + ": move failed (" + err + ")");

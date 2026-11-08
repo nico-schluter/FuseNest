@@ -111,6 +111,31 @@ int main() {
               "two placements in turn equal their composition");
     }
 
+    // Confirming that an instance took its new transform is a cell-wise
+    // comparison, and write-back reads a false from it as "the move did not
+    // happen". So it has to be tight enough to catch a position that did not
+    // take, and loose enough that a matrix which merely went through Fusion and
+    // came back still compares equal to itself.
+    {
+        const Mat4 seated = multiply4(move, tilted);
+        check(approxEqual4(seated, seated, 1e-6), "a transform equals itself");
+
+        Mat4 rounded = seated;
+        rounded[3] += 1e-9;   // translation, centimetres
+        rounded[0] += 1e-9;   // rotation
+        check(approxEqual4(rounded, seated, 1e-6),
+              "a transform that only rounded still compares equal");
+
+        Mat4 unmoved = tilted;
+        check(!approxEqual4(unmoved, seated, 1e-6),
+              "an instance left where it was does NOT compare equal");
+
+        Mat4 offBy10um = seated;
+        offBy10um[7] += 1e-3;  // 10 microns in centimetres
+        check(!approxEqual4(offBy10um, seated, 1e-6),
+              "ten microns out of position does not compare equal");
+    }
+
     std::printf(g_failures ? "\n%d failure(s)\n" : "\nall passed\n", g_failures);
     return g_failures ? 1 : 0;
 }

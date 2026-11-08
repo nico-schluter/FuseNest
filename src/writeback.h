@@ -1,6 +1,6 @@
 // Applying a nesting result to the model.
 //
-// Two Fusion constraints shape this:
+// Three Fusion constraints shape this:
 //
 //  1. A Move feature takes a Matrix3D and Fusion requires it to be a RIGID
 //     transform. A 2D reflection is not one, so a reflected placement is
@@ -9,7 +9,13 @@
 //     over -- but that changes which face is up, so it is a deliberate feature
 //     rather than a silent fallback. We never request reflection today.)
 //
-//  2. There is no undo-transaction API. Fusion groups whatever happens inside a
+//  2. A move feature is a timeline entry, so a DIRECT design has nowhere to put
+//     one: `MoveFeatures::add` applies the move and returns nothing. Success is
+//     therefore read differently in the two design types -- see the add site --
+//     and an instance's new transform needs no snapshot there, because in a
+//     direct design the transform is the model rather than a pending change.
+//
+//  3. There is no undo-transaction API. Fusion groups whatever happens inside a
 //     command's execute handler into one undo step, so this must be called from
 //     there, not directly from the CustomEvent handler that receives the result.
 //     This matters more now than it did: applying a layout deletes joints, and

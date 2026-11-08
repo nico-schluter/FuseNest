@@ -1,5 +1,7 @@
 #include "transform4.h"
 
+#include <cmath>
+
 namespace fusenest {
 
 Mat4 identity4() {
@@ -27,6 +29,12 @@ void apply4(const Mat4& m, double& x, double& y, double& z) {
     x = nx;
     y = ny;
     z = nz;
+}
+
+bool approxEqual4(const Mat4& a, const Mat4& b, double tol) {
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (std::fabs(a[i] - b[i]) > tol) return false;
+    return true;
 }
 
 }  // namespace fusenest

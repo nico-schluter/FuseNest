@@ -27,4 +27,13 @@ Mat4 multiply4(const Mat4& a, const Mat4& b);
 /// means is where it sends a point.
 void apply4(const Mat4& m, double& x, double& y, double& z);
 
+/// Whether every cell agrees to within `tol`.
+///
+/// For confirming that a transform a Fusion object was handed is the one it now
+/// carries. Cell-wise and absolute, deliberately: the cells are a rotation
+/// (order 1) and a translation in centimetres (order 1e3 for a sheet), so the
+/// one tolerance that has to be chosen is the translation's, and a relative
+/// test would hide a millimetre of drift in a part 2.5 m along the strip.
+bool approxEqual4(const Mat4& a, const Mat4& b, double tol);
+
 }  // namespace fusenest
