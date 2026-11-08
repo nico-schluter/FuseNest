@@ -30,7 +30,7 @@ struct NestRequest {
     int workers = 4;
     /// Raises the kernel's log level from info to debug. Info already covers
     /// every cycle; debug adds sparrow's per-iteration separator output.
-    bool verboseLog = false;
+    bool captureDiagnostics = false;
 
     std::string describe() const;
 };

@@ -2,6 +2,7 @@
 
 #include "log.h"
 #include "nest_request.h"
+#include "settings.h"
 #include "preview.h"
 #include "profile.h"
 #include "solver.h"
@@ -45,7 +46,7 @@ const char* kInSpacing = "fnSpacing";
 const char* kInRotation = "fnRotation";
 const char* kInBudget = "fnBudget";
 const char* kInWorkers = "fnWorkers";
-const char* kInVerbose = "fnVerbose";
+const char* kInDiagnostics = "fnVerbose";
 const char* kInStatus = "fnStatus";
 const char* kInJob = "fnJob";
 const char* kInIssues = "fnIssues";
@@ -86,11 +87,29 @@ struct SavedSetup {
     int rotationIndex = 1;
     int timeBudgetSeconds = 10;
     int workers = 4;
-    bool verboseLog = false;
+    bool captureDiagnostics = false;
     std::vector<std::string> partTokens;
 };
 
 SavedSetup g_saved;
+
+/// Seeds the in-memory setup from settings.json, so the dialog opens on what
+/// the user chose last SESSION rather than on our defaults. Called once at
+/// registration; everything after that is the live value.
+void seedSavedSetupFromSettings() {
+    const Settings& s = settings();
+    g_saved = SavedSetup{};
+    g_saved.sheetHeightMm = s.sheetHeightMm;
+    g_saved.sheetWidthMm = s.sheetWidthMm;
+    g_saved.partSpacingMm = s.partSpacingMm;
+    g_saved.rotationIndex = s.rotationIndex;
+    g_saved.timeBudgetSeconds = s.timeBudgetSeconds;
+    g_saved.workers = s.workers;
+    g_saved.captureDiagnostics = s.captureDiagnostics;
+    // Values only: there are no selection tokens to restore from a previous
+    // session, and restoreSetupSelections is gated separately anyway.
+    g_saved.valid = true;
+}
 
 /// A job built and ready, waiting for the engine to be free.
 ///
@@ -115,7 +134,7 @@ struct PendingJob {
     std::string instanceJson;
     int budgetSeconds = 0;
     int workers = 0;
-    int verboseLevel = 3;
+    int verboseLevel = 1;
     std::vector<Profile> profiles;
     std::string summary;
     std::size_t itemCount = 0;
@@ -211,7 +230,7 @@ void maybeAdvancePreview();
 void reopenSetup() {
     g_restoreSelections = true;
     if (g_cmdDef && g_cmdDef->execute()) {
-        logLine("setup dialog reopened for another pass");
+        logDiag("setup dialog reopened for another pass");
         return;
     }
     std::string err;
@@ -338,6 +357,31 @@ RotationMode rotationFromIndex(int index) {
     }
 }
 
+/// Writes one diagnostic artefact beside the log, if the user asked for them.
+///
+/// Three things have to be true, and any of them being false is a quiet
+/// no-op rather than a failure: diagnostics are being captured, there is a
+/// writable directory, and the write itself works.
+///
+/// One run's worth, overwritten each time, rather than a rotation to match the
+/// journal's five sessions. These files are large and they are the ones the
+/// diagnostic report collects at the moment a nest goes wrong -- which is the
+/// run the user still has in front of them. Keeping older ones would mean
+/// carrying a user's part outlines around for days to answer a question nobody
+/// asked yet.
+void writeDiagnosticFile(const std::string& name, const std::string& contents) {
+    if (!logDiagnostics()) return;
+    if (outputDir().empty()) return;
+    const std::string path = outputDir() + "/" + name;
+    std::ofstream f(path, std::ios::trunc);
+    if (!f) {
+        logLine("could not write " + name);
+        return;
+    }
+    f << contents;
+    logLine("wrote " + path + " (" + std::to_string(contents.size()) + " bytes)");
+}
+
 /// Stashes the dialog exactly as the user left it, so cancelling out of the
 /// result dialog can put it back rather than making them set it up again.
 void rememberSetup(const Ptr<CommandInputs>& inputs, const NestRequest& req) {
@@ -349,7 +393,7 @@ void rememberSetup(const Ptr<CommandInputs>& inputs, const NestRequest& req) {
     g_saved.partSpacingMm = req.partSpacingMm;
     g_saved.timeBudgetSeconds = req.timeBudgetSeconds;
     g_saved.workers = req.workers;
-    g_saved.verboseLog = req.verboseLog;
+    g_saved.captureDiagnostics = req.captureDiagnostics;
     if (Ptr<DropDownCommandInput> d = inputs->itemById(kInRotation))
         if (Ptr<ListItem> item = d->selectedItem()) g_saved.rotationIndex = item->index();
 
@@ -366,7 +410,28 @@ void rememberSetup(const Ptr<CommandInputs>& inputs, const NestRequest& req) {
         if (!token.empty()) g_saved.partTokens.push_back(token);
     }
     g_saved.valid = true;
-    logLine("remembered setup: " + std::to_string(g_saved.partTokens.size()) + " of " +
+
+    // Persisted as well as remembered: the in-memory copy serves the handoff
+    // back from the result dialog, the file serves the next time Fusion starts.
+    // A write that fails is not worth telling anyone about -- the nest about to
+    // run is unaffected -- so it goes in the journal and nowhere else.
+    Settings next = settings();
+    next.sheetHeightMm = req.sheetHeightMm;
+    next.sheetWidthMm = req.sheetWidthMm;
+    next.partSpacingMm = req.partSpacingMm;
+    next.rotationIndex = g_saved.rotationIndex;
+    next.timeBudgetSeconds = req.timeBudgetSeconds;
+    next.workers = req.workers;
+    next.captureDiagnostics = req.captureDiagnostics;
+    applySettings(next);
+    // No line for a change of level: this runs inside execute, just after the
+    // request summary, which already states the level in force for the run
+    // about to happen. The session header can go stale, but every run restates
+    // it a few lines later.
+    logSetDiagnostics(next.captureDiagnostics || next.traceLog);
+    if (!saveSettings(next)) logLine("settings could not be saved; this session only");
+
+    logDiag("remembered setup: " + std::to_string(g_saved.partTokens.size()) + " of " +
             std::to_string(req.parts.size()) + " selections tokenised");
 }
 
@@ -392,8 +457,8 @@ NestRequest readInputs(const Ptr<CommandInputs>& inputs) {
         req.timeBudgetSeconds = s->value();
     if (Ptr<IntegerSpinnerCommandInput> s = inputs->itemById(kInWorkers))
         req.workers = s->value();
-    if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInVerbose))
-        req.verboseLog = b->value();
+    if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInDiagnostics))
+        req.captureDiagnostics = b->value();
 
     return req;
 }
@@ -508,7 +573,7 @@ class ResultDestroyHandler : public CommandEventHandler {
         // Unconditional: a dialog that is gone has nobody left to show progress
         // to, so the engine has no reason to keep burning cores. On OK the
         // solve is already over and this is a no-op.
-        logLine(timingReport());
+        logDiag(timingReport());
 
         // No unhide here any more. Hiding happens inside executePreview now, so
         // Fusion's rollback restores it on every termination -- cancel,
@@ -608,7 +673,7 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
         // A solve may already have published layouts before this dialog opened.
         // Only updates state here; the first tick's status write draws it.
         maybeAdvancePreview();
-        logLine("result dialog open");
+        logDiag("result dialog open");
     }
 
   private:
@@ -753,8 +818,11 @@ void onProgressTick() {
         refreshResultDialog();
     }
 
+    // Accounting, not events: a solve that runs for a minute would otherwise
+    // put a redraw census and a full timing table in the journal ten times
+    // over, which is the sort of thing that makes a log worth not reading.
     if (g_tickCount == 1 || g_tickCount % 40 == 0)
-        logLine("tick " + std::to_string(g_tickCount) + ": gen " +
+        logDiag("tick " + std::to_string(g_tickCount) + ": gen " +
                 std::to_string(g_shownInfo.generation) + ", redraws " +
                 std::to_string(g_toggles) + " (" + std::to_string(g_skippedRedraws) +
                 " skipped as invisible), previews " + std::to_string(g_previewCount) + "\n" +
@@ -794,12 +862,11 @@ void reportCompletion() {
     if (rc != 0) {
         logLine("solve failed (rc " + std::to_string(rc) + "): " + solverLastError());
     } else {
-        const std::string json = solverResultJson();
-        const std::string path = std::string(outputDir()) + "/fusenest_solution.json";
-        {
-            std::ofstream f(path);
-            if (f) f << json;
-        }
+        // A diagnostic artefact, not part of the result: the placements the
+        // add-in acts on come back through the snapshot. Written only when the
+        // user asked for diagnostics, and only when there is somewhere to
+        // write -- see writeDiagnosticFile.
+        writeDiagnosticFile("fusenest_solution.json", solverResultJson());
         logLine("solve complete in " + std::to_string(static_cast<long>(solverElapsedMs())) +
                 " ms, generation " + std::to_string(solverSnapshotGeneration()));
     }
@@ -875,10 +942,20 @@ class ExecuteHandler : public CommandEventHandler {
                 logLine("blocker missed by the setup check: " + b.name + ": " + b.reason);
             }
             os << "\n\nThe dialog should have caught this before you pressed Nest."
-               << "\n\nLog: " << logPath();
+               << "\n\n" << logLocation();
             if (ui) ui->messageBox(os.str(), "FuseNest");
             return;
         }
+
+        // The journal gets the shape of the extraction; the per-part lines are
+        // in profile.cpp behind logDiag, because one line per part is a page of
+        // log for a job of any size.
+        logLine("extracted " + std::to_string(extracted.profiles.size()) + " units from " +
+                std::to_string(extracted.unitsExamined) + " selections: " +
+                std::to_string(totalPoints) + " points, " +
+                std::to_string(static_cast<long>(totalAreaMm2)) + " mm2 total, " +
+                std::to_string(approximated) + " approximated, " +
+                std::to_string(extracted.holesDropped) + " holes dropped");
 
         g_lastProfiles = extracted.profiles;
         SolverInput input;
@@ -886,13 +963,13 @@ class ExecuteHandler : public CommandEventHandler {
             ScopedTime _t("setup.buildSolverInput");
             input = buildSolverInput(req, extracted.profiles, "fusenest");
         }
-        const std::string instancePath = std::string(outputDir()) + "/fusenest_instance.json";
-        {
-            std::ofstream f(instancePath);
-            if (f) f << input.json;
-        }
-        logLine("wrote solver input: " + instancePath + " (" + std::to_string(input.json.size()) +
-                " bytes, " + std::to_string(input.itemCount) + " items)");
+        // This file is every outline in the job. It is the most useful thing
+        // to have when a nest goes wrong and the one thing a user might not
+        // want to hand over, which is why it is behind the checkbox rather
+        // than written on every run as it used to be.
+        writeDiagnosticFile("fusenest_instance.json", input.json);
+        logLine("solver input: " + std::to_string(input.json.size()) + " bytes, " +
+                std::to_string(input.itemCount) + " items");
 
         // Everything command 1 learned, carried into the result dialog rather
         // than thrown at a message box the user has to dismiss before working.
@@ -914,7 +991,7 @@ class ExecuteHandler : public CommandEventHandler {
 
         if (input.itemCount == 0) {
             if (ui)
-                ui->messageBox(std::string("Nothing to nest.\n\nLog: ") + logPath(),
+                ui->messageBox("Nothing to nest.\n\n" + logLocation(),
                                "FuseNest");
             return;
         }
@@ -924,8 +1001,11 @@ class ExecuteHandler : public CommandEventHandler {
         pending.instanceJson = input.json;
         pending.budgetSeconds = req.timeBudgetSeconds;
         pending.workers = req.workers;
-        // 4 = debug, 3 = info.
-        pending.verboseLevel = req.verboseLog ? 4 : 3;
+        // 1 = errors only. The old default was 3 (info), which is why a
+        // normal run used to bury its own twenty useful lines under three
+        // thousand of sparrow's. Diagnostics puts the narrative back, and the
+        // trace escape hatch in settings.json adds the per-iteration chatter.
+        pending.verboseLevel = settings().traceLog ? 4 : (req.captureDiagnostics ? 3 : 1);
         pending.profiles = extracted.profiles;
         pending.summary = g_jobSummary;
         pending.itemCount = input.itemCount;
@@ -961,12 +1041,12 @@ class ExecuteHandler : public CommandEventHandler {
         if (!beginJob(pending, startError)) {
             logLine("solverStart failed: " + startError);
             if (ui)
-                ui->messageBox("Could not start nesting:\n" + startError + "\n\nLog: " + logPath(),
+                ui->messageBox("Could not start nesting:\n" + startError + "\n\n" + logLocation(),
                                "FuseNest");
             return;
         }
 
-        logLine(timingReport());
+        logDiag(timingReport());
 
         // The dialog cannot open from here -- this command still owns the UI.
         g_launchPending = true;
@@ -986,7 +1066,7 @@ class DestroyHandler : public CommandEventHandler {
         // directions, so the hop is gone. Keeping it would have meant keeping a
         // registered event and a handler for a path nothing takes.
         if (g_resultDef && g_resultDef->execute()) {
-            logLine("result dialog launched");
+            logDiag("result dialog launched");
             return;
         }
 
@@ -1017,8 +1097,8 @@ void restoreSetupValues(const Ptr<CommandInputs>& inputs) {
         sp->value(g_saved.timeBudgetSeconds);
     if (Ptr<IntegerSpinnerCommandInput> sp = inputs->itemById(kInWorkers))
         sp->value(g_saved.workers);
-    if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInVerbose))
-        b->value(g_saved.verboseLog);
+    if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInDiagnostics))
+        b->value(g_saved.captureDiagnostics);
 }
 
 /// Reselects what the last job was given, by token.
@@ -1110,7 +1190,7 @@ void refreshSetupIssues(const Ptr<CommandInputs>& inputs) {
     g_setupIssues = validateSelections(Application::get(), req.parts);
     const double ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    logLine("setup check: " + std::to_string(req.parts.size()) + " selections in " +
+    logDiag("setup check: " + std::to_string(req.parts.size()) + " selections in " +
             std::to_string(static_cast<long>(ms)) + " ms, " +
             std::to_string(g_setupIssues.size()) + " rejected");
 
@@ -1238,7 +1318,15 @@ class CreatedHandler : public CommandCreatedEventHandler {
         // all cores measured faster, but the efficiency cores make a poor
         // default for a latency-sensitive interactive run.
         inputs->addIntegerSpinnerCommandInput(kInWorkers, "Workers", 1, 64, 1, 4);
-        inputs->addBoolValueInput(kInVerbose, "Verbose log", true, "", false);
+        // Not "verbose log": what it controls is whether this run records
+        // enough to diagnose it afterwards, including files containing the part
+        // outlines. The label has to say that, because the checkbox is the only
+        // consent anyone gives for those files.
+        if (Ptr<BoolValueCommandInput> b = inputs->addBoolValueInput(
+                kInDiagnostics, "Capture diagnostics", true, "", false)) {
+            b->tooltip("Records the solver's own narrative, timings, and files containing "
+                       "the outlines of the parts in this nest.");
+        }
 
         // Last, so it reads as a footer under the inputs rather than a field,
         // and full width because it carries a sentence, not a value. Two rows:
@@ -1260,7 +1348,7 @@ class CreatedHandler : public CommandCreatedEventHandler {
         // Selections are restored on activate, not here: a selection input
         // cannot take entities until the dialog is actually up.
         cmd->activate()->add(&activate_);
-        logLine("commandCreated: dialog built");
+        logDiag("commandCreated: dialog built");
     }
 
   private:
@@ -1327,6 +1415,10 @@ bool registerNestCommand(const Ptr<Application>& app) {
         logLine("solverInit failed -- the command will register but cannot run");
         return false;
     }
+
+    // The dialog's remembered values come from settings.json, so what the user
+    // chose last session is what the dialog opens on.
+    seedSavedSetupFromSettings();
 
     logLine("command registered");
     return true;

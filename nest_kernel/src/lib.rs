@@ -431,12 +431,22 @@ impl SolutionListener for FfiListener {
         // Which ReportType a solution arrives under is the difference between a
         // layout that can be previewed and one with items still overlapping, so
         // it is worth seeing in the trace.
-        push_log(format!(
-            "[SOL] {:?}: width {:.3}, density {:.2}%",
-            r,
-            width,
-            density * 100.0
-        ));
+        //
+        // Through the log macros, NOT push_log: these fire once per improvement
+        // -- hundreds per solve -- and a direct push bypasses set_max_level
+        // entirely, so they reached the host's journal even with logging set to
+        // errors only. Final is the one worth having whenever anything is being
+        // captured; the rest are the narrative, and belong a level down.
+        if r == ReportType::Final {
+            log::info!("[SOL] Final: width {:.3}, density {:.2}%", width, density * 100.0);
+        } else {
+            log::debug!(
+                "[SOL] {:?}: width {:.3}, density {:.2}%",
+                r,
+                width,
+                density * 100.0
+            );
+        }
 
         // This is what makes early accept possible: a feasible report is the
         // same kind of artifact as the final answer, just earlier. optimize()
@@ -464,14 +474,16 @@ impl SolutionListener for FfiListener {
     /// Once per separate() call -- one cycle. sparrow logs the decision that
     /// follows but not the effort it took to get there.
     fn report_separation_result(&mut self, r: SeparationResult) {
-        push_log(format!(
+        // Info rather than push_log, for the same reason as the solution
+        // reports: one line per cycle is the narrative, not an error.
+        log::info!(
             "[SEP] {} after {} iters in {:.2}s ({} evals, {} moves)",
             if r.success { "separated" } else { "FAILED" },
             r.iterations,
             r.elapsed_seconds,
             r.total_evals,
             r.total_moves
-        ));
+        );
     }
 
     fn report_separation_progress(&mut self, p: SeparationProgress) {

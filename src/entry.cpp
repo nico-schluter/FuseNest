@@ -10,6 +10,7 @@
 
 #include "log.h"
 #include "nest_command.h"
+#include "settings.h"
 
 #include <Core/CoreAll.h>
 #include <Fusion/FusionAll.h>
@@ -29,12 +30,29 @@ extern "C" XI_EXPORT bool run(const char* context) {
     if (!ui) return false;
 
     try {
+        // Settings first, and inside the try: the file decides whether this
+        // session captures diagnostics, and the log header should say so. It
+        // cannot refuse to load -- a missing, truncated or hand-mangled file
+        // comes back as defaults with a note (see settings.h) -- but a debug
+        // aid gets no chance to take the add-in down with it either way.
+        const fusenest::SettingsLoad loaded = fusenest::loadSettings();
+        fusenest::applySettings(loaded.values);
+        fusenest::logSetDiagnostics(loaded.values.captureDiagnostics || loaded.values.traceLog);
+
         fusenest::logBegin("run");
+        if (!loaded.fileFound) {
+            fusenest::logLine("no settings file yet; using defaults");
+        } else if (loaded.recovered) {
+            fusenest::logLine("settings partly unusable; defaults stood in:");
+            for (const std::string& note : loaded.notes) fusenest::logLine("  " + note);
+        } else {
+            fusenest::logLine("settings loaded");
+        }
         fusenest::logLine(std::string("context: ") + (context ? context : "<null>"));
 
         if (!fusenest::registerNestCommand(app)) {
-            ui->messageBox(std::string("FuseNest failed to register its command.\n\nLog: ") +
-                               fusenest::logPath(),
+            ui->messageBox("FuseNest failed to register its command.\n\n" +
+                               fusenest::logLocation(),
                            "FuseNest");
             return false;
         }
@@ -56,6 +74,10 @@ extern "C" XI_EXPORT bool stop(const char* context) {
         fusenest::unregisterNestCommand(app);
     } catch (...) {
     }
+
+    // After the unregister, so anything that happened on the way out is in the
+    // file: the stream lives in static storage this dylib is about to lose.
+    fusenest::logEnd();
 
     ui = nullptr;
     app = nullptr;

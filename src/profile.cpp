@@ -363,7 +363,7 @@ ExtractResult extractProfiles(const Ptr<Application>& app,
         }
 
         result.holesDropped += static_cast<int>(profile.holes.size());
-        logLine("profile " + profile.name + ": " + std::to_string(profile.outer.size()) +
+        logDiag("profile " + profile.name + ": " + std::to_string(profile.outer.size()) +
                 " outer points, " + std::to_string(profile.holes.size()) + " holes, " +
                 std::to_string(profile.areaMm2) + " mm2" +
                 (profile.silhouetteApproximated ? ", silhouette approximated" : "") +

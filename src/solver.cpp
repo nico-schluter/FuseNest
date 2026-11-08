@@ -220,6 +220,10 @@ void solverDrainKernelLog() {
         while (p < end) {
             const char* nl = static_cast<const char*>(std::memchr(p, '\n', end - p));
             const std::size_t len = nl ? static_cast<std::size_t>(nl - p) : static_cast<std::size_t>(end - p);
+            // Journal, not logDiag: the kernel's own level decides what it
+            // emits at all. At the normal level it emits errors only, and a
+            // solver error is exactly what the journal is for; the narrative
+            // only appears once diagnostics have raised that level.
             if (len) logLine("  kernel | " + std::string(p, len));
             p += len + 1;
         }

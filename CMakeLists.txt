@@ -60,9 +60,11 @@ add_library(${ADDIN_NAME} SHARED
     src/log.cpp
     src/nest_command.cpp
     src/nest_request.cpp
+    src/paths.cpp
     src/preview.cpp
     src/profile.cpp
     src/solver.cpp
+    src/settings.cpp
     src/solver_input.cpp
     src/timing.cpp
     src/transform4.cpp
@@ -87,9 +89,11 @@ set_target_properties(${ADDIN_NAME} PROPERTIES
 target_include_directories(${ADDIN_NAME} SYSTEM PRIVATE "${FUSION_API}/include")
 target_link_libraries(${ADDIN_NAME} PRIVATE ${FUSION_API_LIBS})
 
-# No stdout in a GUI process, so the log path is compiled in. Points at the repo
-# during development; change this before shipping.
-target_compile_definitions(${ADDIN_NAME} PRIVATE FUSENEST_LOG_DIR="${CMAKE_SOURCE_DIR}")
+# The journal, the settings file and any diagnostic dumps go to a per-user
+# directory resolved at RUN time (see src/paths.cpp) -- a compiled-in path meant
+# that on any machine but the build machine every write silently failed. Only
+# the version is baked in, for the log header and the diagnostic report.
+target_compile_definitions(${ADDIN_NAME} PRIVATE FUSENEST_VERSION="${PROJECT_VERSION}")
 
 # The two umbrella headers are several seconds of compile on their own. Paying
 # that once takes incremental rebuilds under a second.
@@ -219,9 +223,21 @@ add_executable(transform4_test EXCLUDE_FROM_ALL
 target_include_directories(transform4_test PRIVATE src)
 target_compile_features(transform4_test PRIVATE cxx_std_17)
 
+# Not geometry, but the same rule applies: settings recovery is checkable from
+# a terminal, and it is the one piece of start-up code whose failure mode is the
+# add-in not loading at all.
+add_executable(settings_test EXCLUDE_FROM_ALL
+    tests/settings_test.cpp
+    src/settings.cpp
+    src/paths.cpp
+)
+target_include_directories(settings_test PRIVATE src)
+target_compile_features(settings_test PRIVATE cxx_std_17)
+
 add_custom_target(run-tests
     COMMAND triangulate_test
     COMMAND transform4_test
-    DEPENDS triangulate_test transform4_test
-    COMMENT "Running geometry tests"
+    COMMAND settings_test
+    DEPENDS triangulate_test transform4_test settings_test
+    COMMENT "Running geometry and settings tests"
 )

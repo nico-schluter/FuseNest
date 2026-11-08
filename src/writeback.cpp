@@ -76,14 +76,14 @@ std::string describeMat4(const Mat4& m) {
 void logMatrixLayout() {
     Ptr<Matrix3D> probe = Matrix3D::create();
     if (!probe || !probe->translation(Vector3D::create(1.0, 2.0, 3.0))) {
-        logLine("writeback: matrix layout probe unavailable");
+        logDiag("writeback: matrix layout probe unavailable");
         return;
     }
 
     const Mat4 cells = toMat4(probe);
     const bool rowMajor = cells[3] == 1.0 && cells[7] == 2.0 && cells[11] == 3.0;
     const bool columnMajor = cells[12] == 1.0 && cells[13] == 2.0 && cells[14] == 3.0;
-    logLine(std::string("writeback: matrix layout is ") +
+    logDiag(std::string("writeback: matrix layout is ") +
             (rowMajor ? "row-major, as assumed"
                       : columnMajor ? "COLUMN-major -- toMat4 is wrong"
                                     : "neither row- nor column-major") +
