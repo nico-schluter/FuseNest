@@ -58,6 +58,7 @@ endforeach()
 add_library(${ADDIN_NAME} SHARED
     src/entry.cpp
     src/log.cpp
+    src/message.cpp
     src/nest_command.cpp
     src/nest_request.cpp
     src/paths.cpp
@@ -234,10 +235,20 @@ add_executable(settings_test EXCLUDE_FROM_ALL
 target_include_directories(settings_test PRIVATE src)
 target_compile_features(settings_test PRIVATE cxx_std_17)
 
+# Nor is this geometry: a message body is HTML whether or not it meant to be,
+# so a part name with an ampersand in it is a correctness question.
+add_executable(message_test EXCLUDE_FROM_ALL
+    tests/message_test.cpp
+    src/message.cpp
+)
+target_include_directories(message_test PRIVATE src)
+target_compile_features(message_test PRIVATE cxx_std_17)
+
 add_custom_target(run-tests
     COMMAND triangulate_test
     COMMAND transform4_test
     COMMAND settings_test
-    DEPENDS triangulate_test transform4_test settings_test
-    COMMENT "Running geometry and settings tests"
+    COMMAND message_test
+    DEPENDS triangulate_test transform4_test settings_test message_test
+    COMMENT "Running geometry, settings and message tests"
 )

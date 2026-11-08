@@ -1,6 +1,7 @@
 #include "nest_command.h"
 
 #include "log.h"
+#include "message.h"
 #include "nest_request.h"
 #include "settings.h"
 #include "preview.h"
@@ -277,7 +278,10 @@ std::string statusText() {
     if (!g_solveFinished) {
         os << "<b>" << (have ? phaseLabel(p.phase) : "Starting") << "</b><br/>";
     } else if (solverReturnCode() != 0) {
-        os << "<b>Failed</b> (rc " << solverReturnCode() << ")<br/>" << solverLastError();
+        // Escaped: a kernel error is a panic message or a serde complaint,
+        // and either can carry a < from a Rust type name.
+        os << "<b>Failed</b> (rc " << solverReturnCode() << ")<br/>"
+           << htmlEscape(solverLastError());
         return os.str();
     } else {
         os << "<b>Finished</b> in " << static_cast<long>(solverElapsedMs()) << " ms<br/>";
@@ -490,14 +494,19 @@ class ResultExecuteHandler : public CommandEventHandler {
         // joint is gone would be indefensible. Undo covers it, which is why the
         // message says so rather than asking first.
         if ((!wb.warnings.empty() || wb.constraintsBroken) && ui) {
-            std::ostringstream os;
-            os << "Applied " << wb.moved << " of " << (wb.moved + wb.skipped) << " parts.\n\n";
+            Message m;
+            m.line("Applied " + std::to_string(wb.moved) + " of " +
+                   std::to_string(wb.moved + wb.skipped) + " parts.");
+            m.gap();
             if (wb.constraintsBroken)
-                os << "Released " << wb.constraintsBroken
-                   << " joint(s), rigid group(s) or grounded component(s) that would have held "
-                      "parts out of the layout. Undo restores them along with the moves.\n";
-            for (const auto& w : wb.warnings) os << "  - " << w << "\n";
-            ui->messageBox(os.str(), "FuseNest");
+                m.line("Released " + std::to_string(wb.constraintsBroken) +
+                       " joint(s), rigid group(s) or grounded component(s) that would have held "
+                       "parts out of the layout. Undo restores them along with the moves.");
+            // Each warning names a part, so each goes through line(), not into
+            // a stream that would hand the name to the HTML parser.
+            for (const auto& w : wb.warnings) m.line("  - " + w);
+            m.gap().markupLine(logLocationMarkup());
+            ui->messageBox(m.str(), "FuseNest");
         }
     }
 };
@@ -625,7 +634,10 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
 
         inputs->addTextBoxCommandInput(kInStatus, "", statusText(), 3, true);
         if (!g_jobSummary.empty())
-            inputs->addTextBoxCommandInput(kInJob, "", g_jobSummary, 6, true);
+            // Seven rows, not six: the summary now ends with the link to the
+            // log, and on a job with a warning in it that line was the one
+            // scrolling out of sight.
+            inputs->addTextBoxCommandInput(kInJob, "", g_jobSummary, 7, true);
 
         cmd->validateInputs()->add(&validate_);
         cmd->executePreview()->add(&preview_);
@@ -847,7 +859,13 @@ void reportCompletion() {
             g_solveFinished = true;
             if (Ptr<Application> app = Application::get())
                 if (Ptr<UserInterface> ui = app->userInterface())
-                    ui->messageBox("Could not start nesting:\n" + error, "FuseNest");
+                    ui->messageBox(Message()
+                                       .line("Could not start nesting:")
+                                       .line(error)
+                                       .gap()
+                                       .markupLine(logLocationMarkup())
+                                       .str(),
+                                   "FuseNest");
         }
         refreshResultDialog();
         return;
@@ -935,15 +953,17 @@ class ExecuteHandler : public CommandEventHandler {
             // and extraction disagreed. Refusing is still right -- splitting the
             // body is what produced silently composed move features -- but it is
             // a bug on our side, so it says so and names what it found.
-            std::ostringstream os;
-            os << "Cannot nest:\n";
+            Message m;
+            m.line("Cannot nest:").gap();
             for (const auto& b : extracted.blockers) {
-                os << "\n  " << b.name << ": " << b.reason;
+                m.line("  " + b.name + ": " + b.reason);
                 logLine("blocker missed by the setup check: " + b.name + ": " + b.reason);
             }
-            os << "\n\nThe dialog should have caught this before you pressed Nest."
-               << "\n\n" << logLocation();
-            if (ui) ui->messageBox(os.str(), "FuseNest");
+            m.gap()
+                .line("The dialog should have caught this before you pressed Nest.")
+                .gap()
+                .markupLine(logLocationMarkup());
+            if (ui) ui->messageBox(m.str(), "FuseNest");
             return;
         }
 
@@ -984,15 +1004,25 @@ class ExecuteHandler : public CommandEventHandler {
             job << "<br/>" << extracted.holesDropped << " holes dropped (a sparrow item "
                 << "cannot carry them)";
         for (const auto& w : extracted.warnings) {
-            job << "<br/>warning: " << w;
+            // A warning names the part it is about, so it is escaped even
+            // though everything around it here is markup we wrote.
+            job << "<br/>warning: " << htmlEscape(w);
             logLine("warning: " + w);
         }
+        // The handoff: however this nest ends, the result dialog carries a
+        // link to the file that explains it. Fusion opens a file:// link in
+        // the default handler, so this is the whole of "show me the output" --
+        // no Save dialog, no clipboard, nothing for the user to find by hand.
+        job << "<br/>" << logLocationMarkup();
+        if (const std::string diag = diagnosticsLocationMarkup(); !diag.empty())
+            job << "<br/>" << diag;
         g_jobSummary = job.str();
 
         if (input.itemCount == 0) {
             if (ui)
-                ui->messageBox("Nothing to nest.\n\n" + logLocation(),
-                               "FuseNest");
+                ui->messageBox(
+                    Message().line("Nothing to nest.").gap().markupLine(logLocationMarkup()).str(),
+                    "FuseNest");
             return;
         }
 
@@ -1041,7 +1071,12 @@ class ExecuteHandler : public CommandEventHandler {
         if (!beginJob(pending, startError)) {
             logLine("solverStart failed: " + startError);
             if (ui)
-                ui->messageBox("Could not start nesting:\n" + startError + "\n\n" + logLocation(),
+                ui->messageBox(Message()
+                                   .line("Could not start nesting:")
+                                   .line(startError)
+                                   .gap()
+                                   .markupLine(logLocationMarkup())
+                                   .str(),
                                "FuseNest");
             return;
         }
@@ -1138,9 +1173,11 @@ void restoreSetupSelections(const Ptr<CommandInputs>& inputs) {
 
     if (missing && app)
         if (Ptr<UserInterface> ui = app->userInterface())
-            ui->messageBox(std::to_string(missing) +
-                               " of the previously selected bodies and components no longer "
-                               "exist and could not be reselected.",
+            ui->messageBox(Message()
+                               .line(std::to_string(missing) +
+                                     " of the previously selected bodies and components no "
+                                     "longer exist and could not be reselected.")
+                               .str(),
                            "FuseNest");
 }
 
@@ -1161,7 +1198,10 @@ std::string issuesHtml(const std::vector<NestIssue>& issues) {
     os << R"(<div style="color:#c0392b">)";
     for (size_t i = 0; i < shown; ++i) {
         if (i) os << (i + 1 == shown && shown == issues.size() ? " and " : ", ");
-        os << "<b>" << issues[i].name << "</b>";
+        // Escaped: this is a component name going inside a tag, and a part
+        // called "Frame & Panel" or "Bracket <rev2>" would otherwise lose the
+        // part of its name that makes it findable.
+        os << "<b>" << htmlEscape(issues[i].name) << "</b>";
     }
     if (shown < issues.size()) os << " and " << (issues.size() - shown) << " more";
     // "cannot be nested" rather than anything about geometry: not every blocker

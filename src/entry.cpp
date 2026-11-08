@@ -9,6 +9,7 @@
 // from throwing out of run(), which would kill the add-in with no message at all.
 
 #include "log.h"
+#include "message.h"
 #include "nest_command.h"
 #include "settings.h"
 
@@ -51,16 +52,34 @@ extern "C" XI_EXPORT bool run(const char* context) {
         fusenest::logLine(std::string("context: ") + (context ? context : "<null>"));
 
         if (!fusenest::registerNestCommand(app)) {
-            ui->messageBox("FuseNest failed to register its command.\n\n" +
-                               fusenest::logLocation(),
+            ui->messageBox(fusenest::Message()
+                               .line("FuseNest failed to register its command.")
+                               .gap()
+                               .markupLine(fusenest::logLocationMarkup())
+                               .str(),
                            "FuseNest");
             return false;
         }
     } catch (const std::exception& e) {
-        if (ui) ui->messageBox(std::string("FuseNest threw: ") + e.what(), "FuseNest");
+        // e.what() is escaped like anything else: it reaches here from any
+        // library in the process, and the box has a link in it, so the body is
+        // being parsed as markup.
+        if (ui)
+            ui->messageBox(fusenest::Message()
+                               .line(std::string("FuseNest threw: ") + e.what())
+                               .gap()
+                               .markupLine(fusenest::logLocationMarkup())
+                               .str(),
+                           "FuseNest");
         return false;
     } catch (...) {
-        if (ui) ui->messageBox("FuseNest threw an unknown exception", "FuseNest");
+        if (ui)
+            ui->messageBox(fusenest::Message()
+                               .line("FuseNest threw an unknown exception")
+                               .gap()
+                               .markupLine(fusenest::logLocationMarkup())
+                               .str(),
+                           "FuseNest");
         return false;
     }
 
