@@ -634,9 +634,9 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
 
         inputs->addTextBoxCommandInput(kInStatus, "", statusText(), 3, true);
         if (!g_jobSummary.empty())
-            // Seven rows, not six: the summary now ends with the link to the
-            // log, and on a job with a warning in it that line was the one
-            // scrolling out of sight.
+            // Seven rows, not six: the summary now ends with the path to the
+            // log, which is long, and on a job with a warning in it that line
+            // was the one scrolling out of sight.
             inputs->addTextBoxCommandInput(kInJob, "", g_jobSummary, 7, true);
 
         cmd->validateInputs()->add(&validate_);
@@ -1009,13 +1009,20 @@ class ExecuteHandler : public CommandEventHandler {
             job << "<br/>warning: " << htmlEscape(w);
             logLine("warning: " + w);
         }
-        // The handoff: however this nest ends, the result dialog carries a
-        // link to the file that explains it. Fusion opens a file:// link in
-        // the default handler, so this is the whole of "show me the output" --
-        // no Save dialog, no clipboard, nothing for the user to find by hand.
-        job << "<br/>" << logLocationMarkup();
-        if (const std::string diag = diagnosticsLocationMarkup(); !diag.empty())
-            job << "<br/>" << diag;
+        // The path as TEXT, not as a link, however much a link belongs here.
+        //
+        // A message box renders <a href="file://..."> as a link and opens it in
+        // the default handler. A TextBoxCommandInput does not: it is a
+        // QTextBrowser, so clicking a link NAVIGATES THE BOX to that URL --
+        // the file's contents replace the summary, and a directory, having
+        // nothing to render, blanks it. The dialog is the one place a link
+        // cannot go, which is the opposite of what the docs suggest.
+        //
+        // Plain text is still worth having: the box is selectable, so the path
+        // can be copied, and every message box that appears around a failure
+        // carries the real link.
+        job << "<br/>" << htmlEscape(logPath().empty() ? "No log could be written."
+                                                       : "Log: " + logPath());
         g_jobSummary = job.str();
 
         if (input.itemCount == 0) {

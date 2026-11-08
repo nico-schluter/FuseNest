@@ -43,19 +43,22 @@ bool logDiagnostics();
 /// Empty when no writable location was found.
 const std::string& logPath();
 
-/// One line of MARKUP naming where to look, for the bottom of a message box:
+/// MARKUP naming where to look, for the bottom of a MESSAGE BOX:
 /// the file as a clickable link, which Fusion opens in the default handler.
 /// Says so plainly when there is nowhere to write rather than linking nowhere.
 ///
-/// Markup, not text, because a Fusion message box parses any body that has a
-/// tag in it -- so a box that ends with this line must build the rest of
-/// itself through fusenest::Message too. See message.h.
+/// Markup, not text, because a message box parses any body that has a tag in
+/// it -- so a box ending with this line must build the rest of itself through
+/// fusenest::Message too. See message.h.
+///
+/// MESSAGE BOX ONLY. A TextBoxCommandInput is a QTextBrowser: clicking a link
+/// in one navigates the box to that URL instead of opening it, replacing the
+/// dialog's contents with the file. Use logPath() and show it as text there.
+///
+/// A second line appears when diagnostics are being captured, linking the
+/// directory rather than the file: the run has left an instance dump and a
+/// solution beside the log, and those are what an issue wants attached.
 std::string logLocationMarkup();
-
-/// The same for the directory, used when diagnostics have put other files
-/// beside the log. Empty when nothing was captured or there is nowhere to
-/// write, so a caller can append it unconditionally.
-std::string diagnosticsLocationMarkup();
 
 /// Directory the log, the settings file and any diagnostic dumps live in.
 /// Empty when no writable location was found -- callers then write nothing.

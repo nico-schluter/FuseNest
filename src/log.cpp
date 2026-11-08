@@ -118,12 +118,11 @@ const std::string& logPath() { return g_path; }
 std::string logLocationMarkup() {
     if (g_path.empty())
         return htmlEscape("No log could be written: FuseNest found nowhere writable to put one.");
-    return "Log: " + fileLink(g_path, "fusenest.log");
-}
 
-std::string diagnosticsLocationMarkup() {
-    if (!g_diagnostics || outputDir().empty()) return "";
-    return "Diagnostics: " + fileLink(outputDir(), "the FuseNest folder");
+    std::string out = "Log: " + fileLink(g_path, "fusenest.log");
+    if (g_diagnostics && !outputDir().empty())
+        out += "<br>Diagnostics: " + fileLink(outputDir(), "the FuseNest folder");
+    return out;
 }
 
 void logSetDiagnostics(bool on) { g_diagnostics = on; }
