@@ -140,6 +140,65 @@ endif()
 # the version is baked in, for the log header and the diagnostic report.
 target_compile_definitions(${ADDIN_NAME} PRIVATE FUSENEST_VERSION="${PROJECT_VERSION}")
 
+# ---------------------------------------------------------------------------
+# Build provenance, baked into the binary rather than kept beside it.
+#
+# Two machines build the two halves of one bundle and neither can build the
+# other's, so "which commit is this binary from" has to be answerable from the
+# binary ITSELF. A side file would answer it until the first time someone zips
+# the folder, mails it, and unzips it somewhere else -- which is exactly how
+# the Windows binary travels.
+#
+# The stamp is printed in the log header, so it earns its place twice: a user's
+# log now names the exact commit their add-in was built from, and
+# make_bundle.cmake reads the same marker straight back out of the .dll and the
+# .dylib to check the two halves of a bundle agree before calling it complete.
+#
+# The dirty flag is evaluated at CONFIGURE time. CMAKE_CONFIGURE_DEPENDS below
+# re-runs configure when the commit changes, so the SHA cannot go stale, but an
+# uncommitted edit after configure will not re-trigger it. So "-dirty" is
+# trustworthy when present and not a guarantee when absent -- which is the
+# right way round for a release check.
+# ---------------------------------------------------------------------------
+find_package(Git QUIET)
+set(FUSENEST_BUILD_REV "unknown")
+if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse --short=7 HEAD
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE _rev OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET RESULT_VARIABLE _rev_rc)
+    if(_rev_rc EQUAL 0 AND _rev)
+        set(FUSENEST_BUILD_REV "${_rev}")
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            OUTPUT_VARIABLE _dirty OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(_dirty)
+            set(FUSENEST_BUILD_REV "${FUSENEST_BUILD_REV}-dirty")
+        endif()
+    endif()
+
+    # HEAD catches a branch switch; the ref file it points at catches a commit
+    # on the current branch. Deliberately NOT .git/index, which changes on
+    # every `git add` and would reconfigure the build constantly.
+    set_property(DIRECTORY APPEND PROPERTY
+                 CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/.git/HEAD")
+    file(READ "${CMAKE_SOURCE_DIR}/.git/HEAD" _head)
+    string(STRIP "${_head}" _head)
+    if(_head MATCHES "^ref: (.+)$")
+        set(_ref "${CMAKE_SOURCE_DIR}/.git/${CMAKE_MATCH_1}")
+        if(EXISTS "${_ref}")
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ref}")
+        endif()
+    endif()
+endif()
+
+set(FUSENEST_BUILD_STAMP "${PROJECT_VERSION}+${FUSENEST_BUILD_REV}")
+message(STATUS "Build stamp: ${FUSENEST_BUILD_STAMP}")
+target_compile_definitions(${ADDIN_NAME} PRIVATE
+    FUSENEST_BUILD_STAMP="${FUSENEST_BUILD_STAMP}")
+
 # The two umbrella headers are several seconds of compile on their own. Paying
 # that once takes incremental rebuilds under a second.
 target_precompile_headers(${ADDIN_NAME} PRIVATE
@@ -436,6 +495,20 @@ set(FUSENEST_STORE_AUTHOR "Nico Schlueter" CACHE STRING
 set(FUSENEST_STORE_COMPANY "Ortus Lab" CACHE STRING
     "CompanyDetails name as the existing listing records it.")
 
+# The Windows binary, as an explicit input.
+#
+# It cannot be built here -- no cross-compiling for the C++ side -- so it comes
+# from the other machine. Naming it on the command line keeps it OUT of
+# dist/${ADDIN_NAME}, which is generated: a .dll sitting in a directory where
+# nothing produces one, no build refreshes it and no rebuild invalidates it is
+# how you ship a binary from last week beside one from today. Here the path is
+# visible in the command that used it, and make_bundle.cmake checks the two
+# binaries carry the same build stamp.
+#
+#   cmake --preset dist -D FUSENEST_WINDOWS_DLL=/path/to/FuseNest.dll
+set(FUSENEST_WINDOWS_DLL "" CACHE FILEPATH
+    "The Windows ${ADDIN_NAME}.dll, built on a Windows machine, to place in the bundle.")
+
 set(BUNDLE_DIR "${CMAKE_SOURCE_DIR}/dist/${ADDIN_NAME}.bundle")
 
 if(EXISTS "${CMAKE_SOURCE_DIR}/packaging/PackageContents.xml")
@@ -458,6 +531,7 @@ add_custom_target(package-bundle
             -D "ADDIN_NAME=${ADDIN_NAME}"
             -D "VERSION=${PROJECT_VERSION}"
             -D "PACKAGE_CONTENTS=${_package_contents}"
+            -D "WINDOWS_DLL=${FUSENEST_WINDOWS_DLL}"
             -P "${CMAKE_SOURCE_DIR}/packaging/make_bundle.cmake"
     DEPENDS ${ADDIN_NAME}
     COMMENT "Assembling ${BUNDLE_DIR}"

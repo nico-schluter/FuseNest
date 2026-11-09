@@ -91,16 +91,37 @@ exactly it:
 FuseNest/
   FuseNest.manifest
   FuseNest.dylib      macOS, universal (x86_64 + arm64)
-  FuseNest.dll        Windows -- built separately, dropped in beside it
+  (FuseNest.dll)      Windows -- NOT here; passed to package-bundle instead
   AddInIcon.svg
 ```
 
 No source ships. Both platform binaries live side by side and Fusion loads
 whichever matches the OS.
 
-`dist/FuseNest/` is also the **merge point** for the two platform binaries:
-each is built on its own machine, and the Windows one is copied in beside the
-dylib before packaging. Nothing cross-compiles.
+`dist/FuseNest/` holds **only what this machine built**. The C++ side does not
+cross-compile, so the other platform's binary is an explicit input to packaging
+rather than a file dropped into a generated directory:
+
+```bash
+cmake --preset dist -D FUSENEST_WINDOWS_DLL=/path/to/FuseNest.dll
+cmake --build --preset dist --target package-bundle
+```
+
+The distinction is not pedantry. `dist/FuseNest/` is generated and gitignored,
+and nothing on a Mac produces a `.dll` -- so a `.dll` living there is an
+artifact no build refreshes, no rebuild invalidates and no one re-checks. That
+is exactly how you ship a binary from last week beside one from today, both
+labelled with the same version by the manifest, with nothing to show for it.
+
+So each binary carries a **build stamp** -- `<version>+<short-sha>`, compiled
+in, printed in the log header, and read back out of the shipped files by
+`make_bundle.cmake`. If the two halves disagree it says so and names both. The
+stamp is in the binary rather than beside it because the Windows one travels by
+zip and email, and a sidecar file does not survive that. It earns its place
+twice: a user's log now names the exact commit their add-in was built from.
+
+`-dirty` on a stamp means uncommitted changes went into that binary, so the
+commit it names does not describe it. Fine for testing, not for a submission.
 
 ### Packaging
 

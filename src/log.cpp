@@ -12,6 +12,18 @@
 #include <mutex>
 #include <sstream>
 
+#ifndef FUSENEST_BUILD_STAMP
+#define FUSENEST_BUILD_STAMP "0.0.0+unknown"
+#endif
+
+// Given external linkage and printed below, so the literal is guaranteed to
+// survive into the binary: packaging/make_bundle.cmake reads this marker out
+// of the shipped .dll and .dylib to prove both halves of a bundle came from
+// the same commit. A const with no references could be optimised away, and the
+// check would then quietly pass by finding nothing.
+extern const char kBuildStamp[];
+const char kBuildStamp[] = FUSENEST_BUILD_STAMP;
+
 #ifndef FUSENEST_VERSION
 #define FUSENEST_VERSION "0.0.0-dev"
 #endif
@@ -148,6 +160,7 @@ void logBegin(const std::string& what) {
     // which build, which machine, when, and whether the quiet level was on.
     g_file << "=== FuseNest " << FUSENEST_VERSION << ": " << what << " ===\n"
            << "started:     " << wallClockNow() << "\n"
+           << "build:       " << kBuildStamp << "\n"
            << "platform:    " << platformName() << " " << architectureName() << "\n"
            << "data dir:    " << outputDir() << "\n"
            << "diagnostics: " << (g_diagnostics ? "capturing" : "off") << "\n"
