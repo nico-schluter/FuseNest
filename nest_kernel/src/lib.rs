@@ -551,6 +551,19 @@ pub struct NkTuning {
     pub compression_decay: f32,
     /// Share of the budget given to exploration; the rest goes to compression.
     pub exploration_share: f32,
+    /// Smallest compression step worth attempting, as a fraction of width.
+    ///
+    /// This is the termination condition for compression: the loop runs while
+    /// the step is at or above it. sparrow's own floor is 0.001%, which is far
+    /// below the point where a success is worth what it costs -- a success does
+    /// NOT decay the step, so once failures have walked the step down near the
+    /// floor, a run of trivially-successful micro-compressions keeps the phase
+    /// alive on gains of a few hundredths of a millimetre. Measured on the
+    /// 29-part instance: of 20 compression successes, 14 were at a 0.002% step
+    /// winning 0.059mm each, and the phase ended only when a failure costing
+    /// 698 iterations finally pushed the step under the floor. 0.01% stops at
+    /// the point the gains stop paying for themselves.
+    pub compression_min_step: f32,
 }
 
 impl Default for NkTuning {
@@ -563,6 +576,7 @@ impl Default for NkTuning {
             max_conseq_failed_attempts: 3,
             compression_decay: 0.5,
             exploration_share: 0.75,
+            compression_min_step: 0.0001,
         }
     }
 }
@@ -614,6 +628,12 @@ fn solve(
     // the loop's step >= floor guard never trips. FailureBased decays on failed
     // attempts instead, so compression stops when it stops making progress.
     cfg.cmpr_cfg.shrink_decay = ShrinkDecayStrategy::FailureBased(tuning.compression_decay);
+
+    // The other half of making compression convergence-bound. FailureBased
+    // decay stops the phase growing without bound, but it does not stop the
+    // tail: see `compression_min_step`. shrink_range is (start, floor), so only
+    // the floor moves -- the first attempt is still sparrow's 0.05%.
+    cfg.cmpr_cfg.shrink_range.1 = tuning.compression_min_step;
 
     if tuning.n_workers > 0 {
         cfg.expl_cfg.separator_config.n_workers = tuning.n_workers as usize;
@@ -1006,10 +1026,20 @@ mod tests {
         )
     }
 
-    /// One worker and a fixed seed. A time-budgeted parallel search is not
-    /// reproducible -- the workers race -- so every test that compares two solves
-    /// runs single-threaded, where the only remaining variance is how many
-    /// iterations fit in the budget.
+    /// One worker and a fixed seed.
+    ///
+    /// The workers do NOT race, which this comment used to claim. `move_items_multi`
+    /// is fork-join: every worker is seeded deterministically at construction, all
+    /// of them run to completion, and the winner is chosen by `min_by_key` over the
+    /// worker list -- so in index order, first minimum on ties. A solve is therefore
+    /// a pure function of (seed, n_workers), and three repeats at each of one and
+    /// two workers were byte-identical.
+    ///
+    /// What is not reproducible is a solve the CLOCK cuts off, because where it cuts
+    /// depends on the machine. That is the reason to pin a worker count here, and it
+    /// is the weaker reason: the stronger one is that n_workers changes the search
+    /// trajectory, so a comparison between two solves has to hold it fixed to be
+    /// about anything else.
     fn comparable(time_limit_ms: u64) -> NkTuning {
         NkTuning { time_limit_ms, n_workers: 1, ..NkTuning::default() }
     }
@@ -1505,6 +1535,14 @@ mod tests {
                 .unwrap_or(NkTuning::default().max_conseq_failed_attempts),
             compression_decay: env_f32("FUSENEST_CMPR_DECAY", NkTuning::default().compression_decay),
             exploration_share: env_f32("FUSENEST_EXPL_SHARE", 0.75),
+            n_workers: std::env::var("FUSENEST_WORKERS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(NkTuning::default().n_workers),
+            compression_min_step: env_f32(
+                "FUSENEST_CMPR_MIN_STEP",
+                NkTuning::default().compression_min_step,
+            ),
             ..NkTuning::default()
         };
 
