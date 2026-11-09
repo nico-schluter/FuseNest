@@ -1001,6 +1001,33 @@ pub extern "C" fn nk_last_panic(buf: *mut u8, len: usize) -> usize {
 mod tests {
     use super::*;
 
+    /// Serialises every test that runs a solve.
+    ///
+    /// The published snapshot, its generation counter, RUNNING and CANCEL are
+    /// process-global -- that is the point of them, since the add-in polls them
+    /// from the main thread while a solve runs on another. Cargo runs tests in
+    /// parallel threads of one process, so two concurrent solves write the same
+    /// globals and any test watching them sees both. snapshots_stream was the one
+    /// that noticed: it would record another test's layout as its own and then
+    /// rightly complain that the width grew and the placement count changed under
+    /// it. That made `cargo test` red on a clean checkout unless someone already
+    /// knew to pass --test-threads=1.
+    ///
+    /// A lock rather than that flag, so the tests that do NOT solve still run in
+    /// parallel, and so the requirement travels with the code instead of living
+    /// in whatever command a reader happens to type.
+    static SOLVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Takes the solve lock for the rest of the test.
+    ///
+    /// Poisoning is ignored on purpose. The lock guards no invariant of its own
+    /// -- it only keeps solves from overlapping -- so a test that panicked while
+    /// holding it has left nothing broken for the next one, and propagating the
+    /// poison would turn one real failure into a cascade of unrelated ones.
+    fn solving() -> std::sync::MutexGuard<'static, ()> {
+        SOLVE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
 
     /// A deterministic instance of plain rectangles, in the shape the add-in
     /// sends: one item per part, demand 1, a simple-polygon ring, 0/180 rotation.
@@ -1069,6 +1096,7 @@ mod tests {
     /// this is where it would show as a wider nest for no reason.
     #[test]
     fn a_partial_sheet_packs_no_worse_than_an_infinite_strip() {
+        let _solving = solving();
         // Run-to-run slack. Both solves are time-budgeted, so neither reaches a
         // fixed point; 5% is comfortably inside that noise and far below the
         // regression this guards against, which costs a whole sheet.
@@ -1117,6 +1145,7 @@ mod tests {
     /// would be nothing to gain by vacating a sheet.
     #[test]
     fn empty_trailing_sheets_are_shed() {
+        let _solving = solving();
         let json = rect_instance(STRIP_HEIGHT, SEPARATION, PARTS);
         nk_log_set_level(0);
 
@@ -1142,6 +1171,7 @@ mod tests {
     /// the result JSON keeps the whole solved layout for inspection.
     #[test]
     fn separators_hold_their_poses() {
+        let _solving = solving();
         let json = rect_instance(STRIP_HEIGHT, SEPARATION, PARTS);
         nk_log_set_level(0);
 
@@ -1183,6 +1213,7 @@ mod tests {
     /// verdict, and it still has to be delivered.
     #[test]
     fn parts_that_do_not_fit_are_counted_as_overflow() {
+        let _solving = solving();
         let json = rect_instance(STRIP_HEIGHT, SEPARATION, PARTS);
         nk_log_set_level(0);
 
@@ -1216,6 +1247,7 @@ mod tests {
     /// nothing locked, nothing overflowing, one sheet used.
     #[test]
     fn a_single_roomy_sheet_is_just_the_strip() {
+        let _solving = solving();
         let json = rect_instance(STRIP_HEIGHT, SEPARATION, PARTS);
         nk_log_set_level(0);
 
@@ -1257,6 +1289,7 @@ mod tests {
     /// is part of the test rather than a count chosen here.
     #[test]
     fn the_returned_layout_is_separated() {
+        let _solving = solving();
         let json = std::fs::read_to_string("../fusenest_instance.json").expect("instance json");
         nk_log_set_level(0);
 
@@ -1300,6 +1333,7 @@ mod tests {
     /// several times one sheet's.
     #[test]
     fn an_automatic_allocation_holds_the_whole_set() {
+        let _solving = solving();
         let json = rect_instance(200.0, SEPARATION, PARTS);
         nk_log_set_level(0);
 
@@ -1338,6 +1372,7 @@ mod tests {
     /// the end, and that the generation advances with them.
     #[test]
     fn snapshots_stream() {
+        let _solving = solving();
         let json = std::fs::read_to_string("../fusenest_instance.json").expect("instance json");
         nk_log_set_level(0);
 
@@ -1408,6 +1443,7 @@ mod tests {
     /// "a new layout exists" and "a person could tell".
     #[test]
     fn visible_change_rate() {
+        let _solving = solving();
         const THRESHOLD_MM: f32 = 1.0;
 
         let json = std::fs::read_to_string("../fusenest_instance.json").expect("instance json");
@@ -1510,6 +1546,7 @@ mod tests {
     /// FUSENEST_INSTANCE / FUSENEST_BUDGET_MS / FUSENEST_LEVEL override defaults.
     #[test]
     fn trace() {
+        let _solving = solving();
         let path = std::env::var("FUSENEST_INSTANCE")
             .unwrap_or_else(|_| "../fusenest_instance.json".into());
         let budget: u64 = std::env::var("FUSENEST_BUDGET_MS")
