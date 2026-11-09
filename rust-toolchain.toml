@@ -1,0 +1,17 @@
+# Pinned so the macOS and Windows builds cannot be two different compilers.
+#
+# Two machines, no cross-compiling, one shipped binary each: a toolchain drift
+# between them is a difference in the solver that nothing in the build would
+# report. rustup reads this file and installs the toolchain and targets on
+# first use, which also makes `rustup target add` an unnecessary step in the
+# Windows setup.
+#
+# Bumping it is a deliberate act. Re-run the native-static-libs check in
+# CMakeLists.txt afterwards: that list is toolchain output, not a constant.
+[toolchain]
+channel = "1.97.0"
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]

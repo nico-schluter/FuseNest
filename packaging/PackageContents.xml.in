@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GENERATED from this template by CMake. Do not edit the copy in dist/.
+
+  The schema here is not guesswork: it is the file Autodesk shipped inside
+  FuseNest 1.0.0 (FuseNest_macos.pkg, pulled from the store 2026-11-09),
+  with the version and paths moved to CMake variables. Four things in it are
+  counter-intuitive enough to be worth stating, because all four were guessed
+  wrong before that file was read:
+
+    ProductCode="*"   A literal asterisk, NOT a GUID. Autodesk substitutes a
+                      per-release code at submission. Do not put a GUID here.
+
+    One GUID, not two. The manifest's "id" and this UpgradeCode are the SAME
+                      GUID: unbraced in the manifest, braced here. It is the
+                      app's identity: change it and the store sees a new app
+                      rather than an update to this listing.
+
+    OS="win64|mac"    Lower case, and NOT the manifest's spelling. The manifest
+                      says supportedOS "windows|mac". Two files, two
+                      vocabularies, both required.
+
+    AutodeskProduct and Platform are "Fusion360" here, while the add-in
+                      manifest says "Fusion". Again: not interchangeable.
+
+  If Autodesk ever returns a different PackageContents.xml, drop it at
+  packaging/PackageContents.xml and the build stages THAT verbatim instead.
+-->
+<ApplicationPackage SchemaVersion="1.0"
+    ProductType="Application"
+
+    AutodeskProduct="Fusion360"
+    Name="@FUSENEST_STORE_NAME@"
+    Description="@FUSENEST_STORE_NAME@"
+    AppVersion="@PROJECT_VERSION@"
+    Author="@FUSENEST_STORE_AUTHOR@"
+    AppNameSpace="com.autodesk.exchange.Fusion360.@FUSENEST_STORE_NAME@"
+    HelpFile="./Contents/resources/help.html"
+    OnlineDocumentation="https://phos.systems"
+
+    ProductCode="*"
+    UpgradeCode="{@FUSENEST_APP_ID@}" >
+
+    <CompanyDetails Name="@FUSENEST_STORE_COMPANY@"
+        Phone=" "
+        Url="https://phos.systems"
+        Email="info@phos.systems" />
+
+    <RuntimeRequirements SupportPath="./Contents/resources" OS="win64|mac" Platform="Fusion360" SeriesMin="" />
+
+    <Components>
+        <RuntimeRequirements SupportPath="./Contents/resources" OS="win64|mac" Platform="Fusion360" SeriesMin="" />
+        <ComponentEntry AppName="@FUSENEST_STORE_NAME@"
+            Version="@PROJECT_VERSION@"
+            ModuleName="./Contents/@ADDIN_NAME@.manifest"
+            AppDescription="@FUSENEST_STORE_NAME@" />
+    </Components>
+
+</ApplicationPackage>

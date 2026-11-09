@@ -8,15 +8,32 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "mac-base",
+      "hidden": true,
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
+      "cacheVariables": {
         "CMAKE_OSX_DEPLOYMENT_TARGET": "14.0"
       }
     },
     {
+      "name": "win-base",
+      "hidden": true,
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
       "name": "dev",
-      "displayName": "dev (native arch, optimised + symbols, ccache)",
+      "displayName": "dev (macOS, native arch, optimised + symbols, ccache)",
       "description": "Edit-build-attach loop. RelWithDebInfo, NOT Debug: a Debug build is -O0 and makes every performance measurement meaningless. Native arch only, so ccache works.",
-      "inherits": "base",
+      "inherits": "mac-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_COMPILER_LAUNCHER": "ccache",
@@ -25,17 +42,48 @@
     },
     {
       "name": "dist",
-      "displayName": "dist (universal x86_64 + arm64)",
-      "description": "Shippable build. ccache is deliberately absent: it cannot handle two -arch flags.",
-      "inherits": "base",
+      "displayName": "dist (macOS, universal x86_64 + arm64)",
+      "description": "Shippable macOS build. ccache is deliberately absent: it cannot handle two -arch flags.",
+      "inherits": "mac-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_OSX_ARCHITECTURES": "x86_64;arm64"
       }
+    },
+    {
+      "name": "win-dev",
+      "displayName": "win-dev (Windows x64, Ninja, optimised + symbols)",
+      "description": "Edit-build loop on Windows. Ninja, so run it from a 'x64 Native Tools' / Developer PowerShell prompt -- cl.exe must be on PATH. RelWithDebInfo for the same reason as dev. No ccache: not assumed present on a Windows box.",
+      "inherits": "win-base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "win-dist",
+      "displayName": "win-dist (Windows x64, Ninja, shippable)",
+      "description": "Shippable Windows build. x86_64 only: Fusion ships win64, so an arm64 Windows host wants this same binary under emulation, not a native one Fusion cannot load.",
+      "inherits": "win-base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "win-vs",
+      "displayName": "win-vs (Windows x64, Visual Studio 2022, for the debugger)",
+      "description": "Fallback and IDE route. The VS generator finds its own toolchain, so it works from a plain shell with no vcvars -- use it when win-dev cannot find cl.exe, and when you want to attach VS to Fusion. Multi-config: pick the configuration at build time.",
+      "inherits": "win-base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" }
     }
   ],
   "buildPresets": [
     { "name": "dev", "configurePreset": "dev" },
-    { "name": "dist", "configurePreset": "dist" }
+    { "name": "dist", "configurePreset": "dist" },
+    { "name": "win-dev", "configurePreset": "win-dev" },
+    { "name": "win-dist", "configurePreset": "win-dist" },
+    { "name": "win-vs", "configurePreset": "win-vs", "configuration": "RelWithDebInfo" }
   ]
 }

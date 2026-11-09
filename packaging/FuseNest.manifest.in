@@ -3,10 +3,10 @@
     "type": "addin",
     "author": "phos.systems",
     "description": {
-        "": "Fusion 2D nesting based on sparrow"
+        "": "Nests flat parts onto sheets for cutting, and applies the layout back to your design."
     },
-    "version": "0.1.0",
-    "supportedOS": "windows|mac",
+    "version": "@PROJECT_VERSION@",
+@FUSENEST_MANIFEST_ID_LINE@    "supportedOS": "windows|mac",
     "runOnStartup": false,
     "editEnabled": false,
     "iconFilename": "AddInIcon.svg"
