@@ -35,4 +35,15 @@ std::string userDataPath(const std::string& name);
 /// exists as something other than a directory. Never throws.
 bool ensureDirectory(const std::string& dir);
 
+/// The directory this dylib was loaded from -- the add-in folder, where the
+/// manifest, the icon and resources/ sit. Resolved from the loaded image
+/// rather than from the working directory, which belongs to Fusion and is not
+/// ours to reason about. Empty if the platform will not say.
+const std::string& addinDir();
+
+/// A path inside the add-in folder, for a file shipped beside the binary.
+/// Empty when addinDir() is, so a caller can pass the result straight on to
+/// an API that treats empty as "not set".
+std::string addinPath(const std::string& relative);
+
 }  // namespace fusenest

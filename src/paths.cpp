@@ -3,7 +3,54 @@
 #include <cstdlib>
 #include <filesystem>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
 namespace fusenest {
+
+namespace {
+
+/// Where this dylib lives, asked of the loader.
+///
+/// Fusion's own working directory is somewhere in the installation and has
+/// nothing to do with the add-in, so a relative path to a shipped file is not
+/// a path to anything. dladdr answers for any address inside the image, and
+/// the address of a function in this file is one.
+std::string resolveAddinDir() {
+#ifdef _WIN32
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&resolveAddinDir), &module))
+        return {};
+    std::wstring buffer(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD n = GetModuleFileNameW(module, buffer.data(),
+                                           static_cast<DWORD>(buffer.size()));
+        if (n == 0) return {};
+        if (n < buffer.size()) {
+            buffer.resize(n);
+            break;
+        }
+        // Truncated. A path may legally exceed MAX_PATH.
+        if (buffer.size() > 32768) return {};
+        buffer.resize(buffer.size() * 2);
+    }
+    std::error_code ec;
+    const std::filesystem::path self(buffer);
+    return self.parent_path().string();
+#else
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void*>(&resolveAddinDir), &info) == 0) return {};
+    if (info.dli_fname == nullptr || *info.dli_fname == '\0') return {};
+    return std::filesystem::path(info.dli_fname).parent_path().string();
+#endif
+}
+
+}  // namespace
 namespace {
 
 const char* kFolderName = "FuseNest";
@@ -70,6 +117,19 @@ std::string userDataPath(const std::string& name) {
     if (dir.empty()) return std::string();
     std::error_code ec;
     return (std::filesystem::path(dir) / name).string();
+}
+
+const std::string& addinDir() {
+    // Cached: the answer cannot change while the image is loaded, and this is
+    // asked once per dialog.
+    static const std::string dir = resolveAddinDir();
+    return dir;
+}
+
+std::string addinPath(const std::string& relative) {
+    const std::string& dir = addinDir();
+    if (dir.empty()) return {};
+    return (std::filesystem::path(dir) / relative).string();
 }
 
 }  // namespace fusenest

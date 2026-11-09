@@ -2,6 +2,7 @@
 
 #include "log.h"
 #include "message.h"
+#include "paths.h"
 #include "nest_request.h"
 #include "settings.h"
 #include "preview.h"
@@ -14,6 +15,7 @@
 #include <Fusion/FusionAll.h>
 
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -511,6 +513,25 @@ class ResultExecuteHandler : public CommandEventHandler {
     }
 };
 
+/// The F1 page, shipped beside the binary.
+///
+/// Absolute, not the relative path the API documents: Fusion resolves a
+/// relative helpFile against its own working directory in practice, and that
+/// is somewhere in the installation. Setting it to an empty string is the
+/// documented way to have no help button, which is also what happens if the
+/// file is missing -- so a build that forgot to stage resources/ loses the
+/// button rather than offering one that opens nothing.
+void attachHelp(const Ptr<Command>& cmd) {
+    const std::string page = addinPath("resources/help.html");
+    if (page.empty()) return;
+    std::error_code ec;
+    if (!std::filesystem::exists(page, ec)) {
+        logLine("help page missing: " + page);
+        return;
+    }
+    cmd->helpFile(page);
+}
+
 /// Fires whenever Fusion decides the preview should be regenerated. Right now
 /// it only counts itself: proving what triggers it is the point of this step.
 class ResultPreviewHandler : public CommandEventHandler {
@@ -620,6 +641,7 @@ class ResultCreatedHandler : public CommandCreatedEventHandler {
 
         cmd->okButtonText("Apply");
         cmd->cancelButtonText("Discard");
+        attachHelp(cmd);
         cmd->isRepeatable(false);
         // Critical: if another command pre-empts this dialog, terminate rather
         // than silently executing. Moving the user's bodies because they
@@ -1299,6 +1321,7 @@ class CreatedHandler : public CommandCreatedEventHandler {
             return;
         }
         cmd->okButtonText("Nest");
+        attachHelp(cmd);
         // Switching document tabs pre-empts this command, and isExecutedWhenPreEmpted
         // defaults to TRUE -- Fusion then fires execute exactly as if OK had been
         // pressed, so reaching for another tab started a real nest and the result

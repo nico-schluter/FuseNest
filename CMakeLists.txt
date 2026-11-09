@@ -113,6 +113,16 @@ target_precompile_headers(${ADDIN_NAME} PRIVATE
 configure_file("packaging/${ADDIN_NAME}.manifest" "${DIST_DIR}/${ADDIN_NAME}.manifest" COPYONLY)
 configure_file("packaging/AddInIcon.svg" "${DIST_DIR}/AddInIcon.svg" COPYONLY)
 
+# The F1 page and the third-party notices it links to. Staged the same way, so
+# a build is a complete add-in folder: Command::helpFile is set to an absolute
+# path under here at run time, and a missing file means no help button rather
+# than a button that opens nothing. notices.html is GENERATED -- see
+# tools/gen_notices.py -- and regenerating it after a dependency change is a
+# deliberate step, not something a build should do silently behind the
+# packager's back.
+configure_file("packaging/resources/help.html" "${DIST_DIR}/resources/help.html" COPYONLY)
+configure_file("packaging/resources/notices.html" "${DIST_DIR}/resources/notices.html" COPYONLY)
+
 # Make an accidental single-architecture release build impossible to miss: an
 # arm64-only add-in loads fine here and silently fails on Intel Macs.
 if(APPLE)

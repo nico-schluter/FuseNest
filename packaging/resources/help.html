@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>FuseNest</title>
+<style>
+  body { font: 13px/1.5 "Segoe UI", -apple-system, sans-serif; color: #222;
+         margin: 1.5em; max-width: 38em; }
+  h1 { font-size: 1.4em; margin: 0 0 0.2em; }
+  h2 { font-size: 1.1em; margin: 1.5em 0 0.4em; }
+  p.lead { color: #555; margin-top: 0; }
+  dt { font-weight: 600; margin-top: 0.6em; }
+  dd { margin: 0 0 0 1.4em; }
+  code { background: #f2f2f2; padding: 0 0.25em; border-radius: 2px; }
+  a { color: #0479B3; }
+  p.note { background: #f7f7f7; border-left: 3px solid #0479B3;
+           padding: 0.6em 0.8em; margin: 0.8em 0; }
+  p.footnote { color: #555; font-size: 0.95em; margin-top: 2em;
+               border-top: 1px solid #e0e0e0; padding-top: 1em; }
+</style>
+</head>
+<body>
+
+<h1>FuseNest</h1>
+<p class="lead">Arranges flat parts onto sheet stock, then moves them there in
+your design &mdash; bodies and component instances alike, in the document you
+have open.</p>
+
+<h2>Steps</h2>
+<ol>
+  <li>Select the bodies and components to nest. Each one is reduced to the
+      outline it casts on the XY plane, so parts must be flat and lying
+      down.</li>
+  <li>Set the <strong>sheet</strong> size and the <strong>spacing</strong> to
+      keep between parts. Leave the width at zero to nest onto one unbounded
+      strip instead of sheets.</li>
+  <li>Choose how far parts may <strong>rotate</strong>. Fewer angles respect
+      grain and finish direction; continuous packs tightest.</li>
+  <li>Press <strong>Nest</strong>. The layout appears as a preview and keeps
+      improving while the solver runs &mdash; press OK at any point to take the
+      best layout so far, or Cancel to leave the design untouched.</li>
+</ol>
+
+<p class="note">Applying a nest moves real geometry. Anything holding a part in
+place &mdash; a joint, a rigid group, a grounded component &mdash; is released
+so the part can reach its spot, and FuseNest says so when it does. A single
+Undo puts back both the moves and the constraints.</p>
+
+<h2>Settings</h2>
+<dl>
+  <dt>Time budget</dt>
+  <dd>How long the solver may search. It is a ceiling, not a target: the
+      preview updates continuously and OK takes whatever is on screen, so a
+      long budget costs nothing if you stop early.</dd>
+
+  <dt>Workers</dt>
+  <dd>How many threads the solver uses. More threads explore more layouts per
+      second; leaving one or two cores free keeps Fusion responsive.</dd>
+
+  <dt>Capture diagnostics</dt>
+  <dd>Records what the solver did, in detail, plus two files describing the
+      outlines in the nest. Off by default. Turn it on when you are about to
+      report a problem &mdash; see <strong>Privacy</strong> below for exactly
+      what that writes down.</dd>
+</dl>
+
+<h2>Privacy</h2>
+<p>FuseNest does not collect, transmit or store anything anywhere. It has no
+   network code. Everything it does happens locally, inside Fusion, in the
+   design you have open.</p>
+
+<p>It does keep a local log, so that a problem you hit can be explained
+   afterwards. The log lives beside the add-in's settings, in
+   <code>Library/Application&nbsp;Support/FuseNest</code> on macOS and
+   <code>%LOCALAPPDATA%\FuseNest</code> on Windows, and the last five sessions
+   are kept. Nothing reads it but you.</p>
+
+<p>With diagnostics <strong>off</strong>, the log holds one line per event: how
+   many parts were selected, the sheet size and settings you chose, how long the
+   solve took, how many parts moved, and the reason for anything FuseNest
+   refused to do. Part and component names appear, because a message about a
+   part is useless without them. No geometry is written.</p>
+
+<p>With <strong>Capture diagnostics</strong> ticked, the same log also gets the
+   solver's own running commentary and timings, and two files are written next
+   to it: <code>fusenest_instance.json</code>, which contains the outline of
+   every part in the nest, and <code>fusenest_solution.json</code>, which
+   contains where each one ended up. Those outlines are the shape of your
+   parts &mdash; the one thing here you might not want to hand to anyone. They
+   are overwritten by the next nest and are never sent anywhere; attaching them
+   to a bug report is your decision to make, not something FuseNest does for
+   you.</p>
+
+<h2>Reporting a problem</h2>
+<p>Tick <strong>Capture diagnostics</strong>, do the thing that went wrong, and
+   the dialog will show you where the log is. Message boxes link straight to
+   it.</p>
+
+<h2>Credits and licences</h2>
+<p>FuseNest nests with <a href="https://github.com/JeroenGar/sparrow">sparrow</a>
+   by Jeroen Gardeyn (KU Leuven), which is built on
+   <a href="https://github.com/JeroenGar/jagua-rs">jagua-rs</a> by the same
+   author. sparrow is MIT-licensed and FuseNest carries a modified copy of it;
+   jagua-rs is used unmodified under the Mozilla Public License 2.0, and its
+   source is available at the link above.</p>
+
+<p>The full notices for every open-source package in the solver, with their
+   licence texts, are in <a href="notices.html">third-party notices</a>.</p>
+
+<p class="footnote">FuseNest is not affiliated with or endorsed by Autodesk.
+   Autodesk and Fusion are trademarks of Autodesk, Inc.</p>
+
+</body>
+</html>
