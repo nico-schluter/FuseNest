@@ -176,12 +176,13 @@ def main():
         count=len(packages),
         rows="\n".join(rows),
         sections="\n".join(sections),
-        missing=("<p class=\"note\">Could not resolve a licence text for: "
+        # Only ever rendered by a run that is about to exit non-zero, so the
+        # page never ships carrying it; it is here so the failure is visible
+        # in the output as well as on the console.
+        missing=("<p class=\"note\">No licence text available for: "
                  + html.escape(", ".join(f"{p['name']} ({'/'.join(u)})"
                                          for p, u in unresolved))
-                 + ". The SPDX expression in the table above is the crate's own "
-                   "declaration; the repository link is the source.</p>")
-        if unresolved else "",
+                 + ".</p>") if unresolved else "",
     )
     out = ROOT / "packaging" / "resources" / "notices.html"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -220,16 +221,8 @@ PAGE = """<!DOCTYPE html>
 <body>
 
 <h1>Third-party notices</h1>
-<p class="lead">FuseNest&#39;s solver is built on {count} open-source packages.
-This page is generated from the dependency graph rather than maintained by
-hand, so it cannot fall behind the build.</p>
-
-<p class="note">The list is deliberately inclusive. It is every crate reachable
-through normal dependencies on every platform FuseNest ships for, which is a
-superset of what any one build links: a few are used only by sparrow&#39;s own
-standalone command-line tools, and Cargo does not distinguish those from the
-library&#39;s own. Naming a package we do not ship is harmless; omitting one we
-do is not.</p>
+<p class="lead">FuseNest&#39;s solver is built on the following {count}
+open-source packages. Their licence terms are reproduced in full below.</p>
 
 <h2>Packages</h2>
 <table>
@@ -238,7 +231,7 @@ do is not.</p>
 </table>
 {missing}
 
-<h2>Licence texts</h2>
+<h2>Licences</h2>
 {sections}
 
 </body>
