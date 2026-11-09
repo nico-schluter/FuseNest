@@ -109,6 +109,16 @@ target_link_libraries(${ADDIN_NAME} PRIVATE ${FUSION_API_LIBS})
 # WIN32_LEAN_AND_MEAN: drops winsock1, which collides with the winsock2 that
 # Rust's std brings in through ws2_32.
 #
+# /EHsc is set EXPLICITLY rather than inherited. The first Windows build had
+# every translation unit warning C4530 -- "C++ exception handler used, but
+# unwind semantics are not enabled" -- which means the flag was not reaching
+# the compiler, whatever CMake's default is supposed to be. That is not a
+# warning to silence: entry.cpp and solver.cpp between them have nine try/catch
+# blocks, they sit on the add-in entry point and the Rust FFI boundary, and
+# without unwind semantics those handlers do not run destructors on the way
+# out. Stating the exception model here makes it independent of what a default
+# happens to be.
+#
 # /bigobj because the two Fusion umbrella headers come in through a PCH and
 # nest_command.cpp is already large enough to be worth not finding out.
 #
@@ -120,7 +130,7 @@ target_link_libraries(${ADDIN_NAME} PRIVATE ${FUSION_API_LIBS})
 # ---------------------------------------------------------------------------
 if(MSVC)
     set_target_properties(${ADDIN_NAME} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-    target_compile_options(${ADDIN_NAME} PRIVATE /utf-8 /bigobj)
+    target_compile_options(${ADDIN_NAME} PRIVATE /EHsc /utf-8 /bigobj)
     target_compile_definitions(${ADDIN_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
@@ -337,14 +347,14 @@ add_executable(triangulate_test EXCLUDE_FROM_ALL
     src/triangulate.cpp
 )
 target_include_directories(triangulate_test PRIVATE src)
-target_compile_features(triangulate_test PRIVATE cxx_std_17)
+target_compile_features(triangulate_test PRIVATE cxx_std_20)
 
 add_executable(transform4_test EXCLUDE_FROM_ALL
     tests/transform4_test.cpp
     src/transform4.cpp
 )
 target_include_directories(transform4_test PRIVATE src)
-target_compile_features(transform4_test PRIVATE cxx_std_17)
+target_compile_features(transform4_test PRIVATE cxx_std_20)
 
 # Not geometry, but the same rule applies: settings recovery is checkable from
 # a terminal, and it is the one piece of start-up code whose failure mode is the
@@ -355,7 +365,7 @@ add_executable(settings_test EXCLUDE_FROM_ALL
     src/paths.cpp
 )
 target_include_directories(settings_test PRIVATE src)
-target_compile_features(settings_test PRIVATE cxx_std_17)
+target_compile_features(settings_test PRIVATE cxx_std_20)
 
 # Nor is this geometry: a message body is HTML whether or not it meant to be,
 # so a part name with an ampersand in it is a correctness question.
@@ -364,7 +374,7 @@ add_executable(message_test EXCLUDE_FROM_ALL
     src/message.cpp
 )
 target_include_directories(message_test PRIVATE src)
-target_compile_features(message_test PRIVATE cxx_std_17)
+target_compile_features(message_test PRIVATE cxx_std_20)
 
 # The same CRT and codepage pinning as the add-in. message_test is the one
 # that genuinely needs /utf-8 -- its non-ASCII literals ARE the test, and MSVC
@@ -373,7 +383,7 @@ target_compile_features(message_test PRIVATE cxx_std_17)
 if(MSVC)
     foreach(t triangulate_test transform4_test settings_test message_test)
         set_target_properties(${t} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-        target_compile_options(${t} PRIVATE /utf-8)
+        target_compile_options(${t} PRIVATE /EHsc /utf-8)
         # settings_test compiles paths.cpp, which includes windows.h.
         target_compile_definitions(${t} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     endforeach()

@@ -11,6 +11,7 @@
 // So every test below uses a frame and a motion that do NOT commute. Reversed
 // multiplication passes trivially on the cases where they do, which is why a
 // rotation-free component or an offset-free motion proves nothing.
+#include <numbers>
 #include "transform4.h"
 
 #include <cmath>
@@ -34,7 +35,7 @@ bool near(double a, double b, double eps = 1e-9) { return std::fabs(a - b) <= ep
 /// the same shape as an occurrence transform that has only ever been moved in
 /// the plane.
 Mat4 motionZ(double deg, double tx, double ty) {
-    const double r = deg * M_PI / 180.0;
+    const double r = deg * std::numbers::pi / 180.0;
     const double c = std::cos(r), s = std::sin(r);
     return Mat4{c, -s, 0, tx,
                 s,  c, 0, ty,

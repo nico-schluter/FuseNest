@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <iomanip>
 #include <sstream>
 #include <vector>
@@ -287,7 +288,7 @@ Ptr<Matrix3D> placementMatrix(const NkPlacement& p) {
 
     Ptr<Vector3D> zAxis = Vector3D::create(0.0, 0.0, 1.0);
     Ptr<Point3D> origin = Point3D::create(0.0, 0.0, 0.0);
-    if (!m->setToRotation(p.rotation * M_PI / 180.0, zAxis, origin)) return nullptr;
+    if (!m->setToRotation(p.rotation * std::numbers::pi / 180.0, zAxis, origin)) return nullptr;
 
     // Solver output is millimetres; everything in Fusion is centimetres.
     if (!m->translation(Vector3D::create(p.tx * kMmToCm, p.ty * kMmToCm, 0.0))) return nullptr;

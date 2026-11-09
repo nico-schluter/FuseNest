@@ -3,6 +3,7 @@
 // Area is the test that matters: a triangulation that covers the right area
 // with the right winding and never overlaps is a correct fill, and all three
 // of those are visible in the numbers without rendering anything.
+#include <numbers>
 #include "triangulate.h"
 
 #include <cmath>
@@ -27,7 +28,7 @@ std::vector<Point2> rect(double x, double y, double w, double h) {
 std::vector<Point2> circle(double cx, double cy, double r, int n) {
     std::vector<Point2> out;
     for (int i = 0; i < n; ++i) {
-        double a = 2.0 * M_PI * i / n;
+        double a = 2.0 * std::numbers::pi * i / n;
         out.push_back({cx + r * std::cos(a), cy + r * std::sin(a)});
     }
     return out;
