@@ -8,6 +8,7 @@
 // will not see an API error. The try/catch here exists only to stop our own C++
 // from throwing out of run(), which would kill the add-in with no message at all.
 
+#include "cpu.h"
 #include "log.h"
 #include "message.h"
 #include "nest_command.h"
@@ -50,6 +51,10 @@ extern "C" XI_EXPORT bool run(const char* context) {
             fusenest::logLine("settings loaded");
         }
         fusenest::logLine(std::string("context: ") + (context ? context : "<null>"));
+        // Always, not behind diagnostics. The worker count is derived rather
+        // than chosen, and it changes the LAYOUT -- so a journal without it
+        // cannot answer why the same parts nested differently elsewhere.
+        fusenest::logLine(fusenest::describeWorkerCount(loaded.values.workerOverride));
 
         if (!fusenest::registerNestCommand(app)) {
             ui->messageBox(fusenest::Message()

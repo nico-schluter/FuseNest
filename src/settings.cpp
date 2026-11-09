@@ -364,12 +364,16 @@ SettingsLoad parseSettings(const std::string& text) {
     // Ranges match the dialog's own limits, so a hand-edited file cannot put
     // the dialog into a state it would refuse. Sheet width 0 is the unbounded
     // strip, which is a real setting rather than a missing one.
+    //
+    // budgetCeilingSeconds has no dialog limits to match -- it has no dialog --
+    // so its range is just what the value can usefully mean: at least a second,
+    // and an hour is already far past the point where a user has walked away.
     readDouble(got, "sheetHeightMm", 0.001, 100000.0, load.values.sheetHeightMm, load);
     readDouble(got, "sheetWidthMm", 0.0, 100000.0, load.values.sheetWidthMm, load);
     readDouble(got, "partSpacingMm", 0.0, 1000.0, load.values.partSpacingMm, load);
     readInt(got, "rotationIndex", 0, 3, load.values.rotationIndex, load);
-    readInt(got, "timeBudgetSeconds", 1, 600, load.values.timeBudgetSeconds, load);
-    readInt(got, "workers", 1, 64, load.values.workers, load);
+    readInt(got, "budgetCeilingSeconds", 1, 3600, load.values.budgetCeilingSeconds, load);
+    readInt(got, "workerOverride", 0, 64, load.values.workerOverride, load);
     readBool(got, "captureDiagnostics", load.values.captureDiagnostics, load);
     readLogLevel(got, load.values.traceLog, load);
 
@@ -389,8 +393,8 @@ std::string formatSettings(const Settings& s) {
        << "  \"sheetWidthMm\": " << s.sheetWidthMm << ",\n"
        << "  \"partSpacingMm\": " << s.partSpacingMm << ",\n"
        << "  \"rotationIndex\": " << s.rotationIndex << ",\n"
-       << "  \"timeBudgetSeconds\": " << s.timeBudgetSeconds << ",\n"
-       << "  \"workers\": " << s.workers << ",\n"
+       << "  \"budgetCeilingSeconds\": " << s.budgetCeilingSeconds << ",\n"
+       << "  \"workerOverride\": " << s.workerOverride << ",\n"
        << "  \"captureDiagnostics\": " << (s.captureDiagnostics ? "true" : "false") << ",\n"
        << "  \"logLevel\": \"" << (s.traceLog ? "trace" : "normal") << "\"\n"
        << "}\n";

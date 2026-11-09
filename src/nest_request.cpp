@@ -33,8 +33,6 @@ std::string NestRequest::describe() const {
     os << "\n"
        << "spacing:      " << partSpacingMm << " mm\n"
        << "rotation:     " << rotationModeLabel(rotation) << "\n"
-       << "budget:       " << timeBudgetSeconds << " s\n"
-       << "workers:      " << workers << "\n"
        << "diagnostics:  " << (captureDiagnostics ? "capturing" : "off") << "\n";
     return os.str();
 }

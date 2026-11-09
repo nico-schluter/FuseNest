@@ -1,5 +1,7 @@
 #include "nest_command.h"
 
+#include "cpu.h"
+
 #include "log.h"
 #include "message.h"
 #include "paths.h"
@@ -47,8 +49,6 @@ const char* kInSheetHeight = "fnSheetHeight";
 const char* kInSheetWidth = "fnSheetWidth";
 const char* kInSpacing = "fnSpacing";
 const char* kInRotation = "fnRotation";
-const char* kInBudget = "fnBudget";
-const char* kInWorkers = "fnWorkers";
 const char* kInDiagnostics = "fnVerbose";
 const char* kInStatus = "fnStatus";
 const char* kInJob = "fnJob";
@@ -88,8 +88,6 @@ struct SavedSetup {
     double sheetWidthMm = 0.0;
     double partSpacingMm = 0.0;
     int rotationIndex = 1;
-    int timeBudgetSeconds = 10;
-    int workers = 4;
     bool captureDiagnostics = false;
     std::vector<std::string> partTokens;
 };
@@ -106,8 +104,6 @@ void seedSavedSetupFromSettings() {
     g_saved.sheetWidthMm = s.sheetWidthMm;
     g_saved.partSpacingMm = s.partSpacingMm;
     g_saved.rotationIndex = s.rotationIndex;
-    g_saved.timeBudgetSeconds = s.timeBudgetSeconds;
-    g_saved.workers = s.workers;
     g_saved.captureDiagnostics = s.captureDiagnostics;
     // Values only: there are no selection tokens to restore from a previous
     // session, and restoreSetupSelections is gated separately anyway.
@@ -137,6 +133,9 @@ struct PendingJob {
     std::string instanceJson;
     int budgetSeconds = 0;
     int workers = 0;
+    /// Whether `workers` was derived or came from settings.json. Journal only --
+    /// a bug report needs to say which, because the count changes the layout.
+    bool workersAuto = true;
     int verboseLevel = 1;
     std::vector<Profile> profiles;
     std::string summary;
@@ -397,8 +396,6 @@ void rememberSetup(const Ptr<CommandInputs>& inputs, const NestRequest& req) {
     g_saved.sheetHeightMm = req.sheetHeightMm;
     g_saved.sheetWidthMm = req.sheetWidthMm;
     g_saved.partSpacingMm = req.partSpacingMm;
-    g_saved.timeBudgetSeconds = req.timeBudgetSeconds;
-    g_saved.workers = req.workers;
     g_saved.captureDiagnostics = req.captureDiagnostics;
     if (Ptr<DropDownCommandInput> d = inputs->itemById(kInRotation))
         if (Ptr<ListItem> item = d->selectedItem()) g_saved.rotationIndex = item->index();
@@ -426,8 +423,6 @@ void rememberSetup(const Ptr<CommandInputs>& inputs, const NestRequest& req) {
     next.sheetWidthMm = req.sheetWidthMm;
     next.partSpacingMm = req.partSpacingMm;
     next.rotationIndex = g_saved.rotationIndex;
-    next.timeBudgetSeconds = req.timeBudgetSeconds;
-    next.workers = req.workers;
     next.captureDiagnostics = req.captureDiagnostics;
     applySettings(next);
     // No line for a change of level: this runs inside execute, just after the
@@ -459,10 +454,6 @@ NestRequest readInputs(const Ptr<CommandInputs>& inputs) {
         req.partSpacingMm = v->value() * kCmToMm;
     if (Ptr<DropDownCommandInput> d = inputs->itemById(kInRotation))
         if (Ptr<ListItem> item = d->selectedItem()) req.rotation = rotationFromIndex(item->index());
-    if (Ptr<IntegerSpinnerCommandInput> s = inputs->itemById(kInBudget))
-        req.timeBudgetSeconds = s->value();
-    if (Ptr<IntegerSpinnerCommandInput> s = inputs->itemById(kInWorkers))
-        req.workers = s->value();
     if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInDiagnostics))
         req.captureDiagnostics = b->value();
 
@@ -747,8 +738,8 @@ bool beginJob(const PendingJob& job, std::string& error) {
         return false;
 
     logLine("solve started: " + std::to_string(job.itemCount) + " items, " +
-            std::to_string(job.workers) + " workers, " + std::to_string(job.budgetSeconds) +
-            " s ceiling, " +
+            std::to_string(job.workers) + (job.workersAuto ? " workers (auto), " : " workers (from settings), ") +
+            std::to_string(job.budgetSeconds) + " s ceiling, " +
             (job.sheeted ? std::to_string(static_cast<long>(job.sheets.width)) +
                                " mm sheets"
                          : std::string("unbounded strip")));
@@ -1058,8 +1049,13 @@ class ExecuteHandler : public CommandEventHandler {
         PendingJob pending;
         pending.valid = true;
         pending.instanceJson = input.json;
-        pending.budgetSeconds = req.timeBudgetSeconds;
-        pending.workers = req.workers;
+        // From settings, not the request: the dialog has no such field, and the
+        // value is a backstop rather than a choice anyone made for this nest.
+        pending.budgetSeconds = settings().budgetCeilingSeconds;
+        // Zero means derive. Resolved HERE rather than in the solver so that the
+        // number the journal reports is the number the solve actually ran with.
+        pending.workersAuto = settings().workerOverride <= 0;
+        pending.workers = resolveWorkerCount(settings().workerOverride);
         // 1 = errors only. The old default was 3 (info), which is why a
         // normal run used to bury its own twenty useful lines under three
         // thousand of sparrow's. Diagnostics puts the narrative back, and the
@@ -1157,10 +1153,6 @@ void restoreSetupValues(const Ptr<CommandInputs>& inputs) {
         if (Ptr<ListItems> items = d->listItems())
             if (g_saved.rotationIndex >= 0 && g_saved.rotationIndex < items->count())
                 items->item(g_saved.rotationIndex)->isSelected(true);
-    if (Ptr<IntegerSpinnerCommandInput> sp = inputs->itemById(kInBudget))
-        sp->value(g_saved.timeBudgetSeconds);
-    if (Ptr<IntegerSpinnerCommandInput> sp = inputs->itemById(kInWorkers))
-        sp->value(g_saved.workers);
     if (Ptr<BoolValueCommandInput> b = inputs->itemById(kInDiagnostics))
         b->value(g_saved.captureDiagnostics);
 }
@@ -1383,11 +1375,15 @@ class CreatedHandler : public CommandCreatedEventHandler {
             items->add(rotationModeLabel(RotationMode::Continuous), false);
         }
 
-        inputs->addIntegerSpinnerCommandInput(kInBudget, "Time budget (s)", 1, 600, 1, 10);
-        // Default 4 = the performance-core count on an M1. Oversubscribing to
-        // all cores measured faster, but the efficiency cores make a poor
-        // default for a latency-sensitive interactive run.
-        inputs->addIntegerSpinnerCommandInput(kInWorkers, "Workers", 1, 64, 1, 4);
+        // There is deliberately no time budget here. Both solver phases stop on
+        // convergence, so the number was a ceiling a normal run never reached
+        // while being labelled as though it bought a better answer. The live
+        // preview and the result dialog's accept are the real control over how
+        // long a nest takes; the backstop is settings().budgetCeilingSeconds.
+        // Nor a worker count. It is derived from the machine's performance-core
+        // count (see cpu.h), which on every machine measured is at least as good
+        // as anything a user would pick -- and unlike the ceiling, a wrong value
+        // here changes the layout, not just how long it takes.
         // Not "verbose log": what it controls is whether this run records
         // enough to diagnose it afterwards, including files containing the part
         // outlines. The label has to say that, because the checkbox is the only

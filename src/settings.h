@@ -31,8 +31,41 @@ struct Settings {
     double sheetWidthMm = 2000.0;
     double partSpacingMm = 2.0;
     int rotationIndex = 1;  // 0 fixed, 1 half, 2 quarter, 3 continuous
-    int timeBudgetSeconds = 10;
-    int workers = 4;
+    /// Wall-clock ceiling on a solve, in seconds. NOT a budget and not in the
+    /// dialog: both solver phases stop on convergence -- exploration on three
+    /// consecutive failed separations, compression on its step decaying below
+    /// the floor -- so a normal run ends long before this. Measured on the
+    /// 29-part instance with the clock set to an hour: 22s, ended by
+    /// exploration's convergence stop. This is the backstop for the case that
+    /// convergence is bounded in cycles rather than time, which no instance
+    /// here has yet produced.
+    ///
+    /// Here rather than in the dialog for the reason traceLog is: a value no
+    /// normal run reaches is not a decision to put in front of anyone, but it
+    /// is still worth being able to pin for a reproducible run or a bug report.
+    ///
+    /// The key is deliberately NOT the "timeBudgetSeconds" that used to back
+    /// the dialog's spinner. That key held values as low as 1, chosen when it
+    /// was a budget that shaped the answer; read as a ceiling it would cut a
+    /// solve off mid-exploration with no dialog left to fix it. An old file's
+    /// key is simply unknown now, and unknown keys are ignored -- so every
+    /// stale value is dropped without a line of migration code.
+    int budgetCeilingSeconds = 600;
+    /// Solver workers, or 0 to derive them from the machine. Not in the dialog,
+    /// for the reason budgetCeilingSeconds is not: the derived value is right on
+    /// every machine this has been run on, and a spinner would only invite
+    /// someone to make it worse. See cpu.h for the policy.
+    ///
+    /// Overriding it is still worth being able to do, and for a better reason
+    /// than the ceiling: worker count changes the LAYOUT, not just the time, so
+    /// one worker is the only way to reproduce a nest exactly -- which is what
+    /// the kernel's own tests pin.
+    ///
+    /// Renamed from "workers" rather than migrated, exactly as the ceiling was.
+    /// An old file's value was written by a spinner whose default happened to
+    /// match this machine's core count; carried onto a 24-core box it would pin
+    /// four workers forever and auto would never run.
+    int workerOverride = 0;
     /// Adds the solver narrative, the timing report and the geometry dumps.
     bool captureDiagnostics = false;
     /// The development escape hatch ("logLevel": "trace"): everything

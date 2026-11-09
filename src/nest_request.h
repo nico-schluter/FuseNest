@@ -26,8 +26,6 @@ struct NestRequest {
     double sheetWidthMm = 0.0;
     double partSpacingMm = 0.0;
     RotationMode rotation = RotationMode::Half;
-    int timeBudgetSeconds = 10;
-    int workers = 4;
     /// Raises the kernel's log level from info to debug. Info already covers
     /// every cycle; debug adds sparrow's per-iteration separator output.
     bool captureDiagnostics = false;

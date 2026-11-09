@@ -56,6 +56,7 @@ endforeach()
 # misses newly added files and links a stale object.
 # ---------------------------------------------------------------------------
 add_library(${ADDIN_NAME} SHARED
+    src/cpu.cpp
     src/entry.cpp
     src/log.cpp
     src/message.cpp
@@ -426,6 +427,16 @@ add_executable(settings_test EXCLUDE_FROM_ALL
 target_include_directories(settings_test PRIVATE src)
 target_compile_features(settings_test PRIVATE cxx_std_20)
 
+# Worker-count policy: pure, and the half of the auto-detection that a test on
+# one machine can actually say something about. The detection beside it answers
+# for THIS machine, so it is exercised but not asserted on.
+add_executable(cpu_test EXCLUDE_FROM_ALL
+    tests/cpu_test.cpp
+    src/cpu.cpp
+)
+target_include_directories(cpu_test PRIVATE src)
+target_compile_features(cpu_test PRIVATE cxx_std_20)
+
 # Nor is this geometry: a message body is HTML whether or not it meant to be,
 # so a part name with an ampersand in it is a correctness question.
 add_executable(message_test EXCLUDE_FROM_ALL
@@ -440,7 +451,7 @@ target_compile_features(message_test PRIVATE cxx_std_20)
 # decoding them as codepage 1252 would turn the escaping check into a pass --
 # but a CRT mismatch between test binaries is the same link failure as above.
 if(MSVC)
-    foreach(t triangulate_test transform4_test settings_test message_test)
+    foreach(t triangulate_test transform4_test settings_test message_test cpu_test)
         set_target_properties(${t} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
         target_compile_options(${t} PRIVATE /EHsc /utf-8)
         # settings_test compiles paths.cpp, which includes windows.h.
@@ -453,8 +464,9 @@ add_custom_target(run-tests
     COMMAND transform4_test
     COMMAND settings_test
     COMMAND message_test
-    DEPENDS triangulate_test transform4_test settings_test message_test
-    COMMENT "Running geometry, settings and message tests"
+    COMMAND cpu_test
+    DEPENDS triangulate_test transform4_test settings_test message_test cpu_test
+    COMMENT "Running geometry, settings, message and cpu tests"
 )
 
 

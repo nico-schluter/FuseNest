@@ -41,7 +41,8 @@ bool allDefault(const Settings& s) {
            near(s.sheetWidthMm, kDefaults.sheetWidthMm) &&
            near(s.partSpacingMm, kDefaults.partSpacingMm) &&
            s.rotationIndex == kDefaults.rotationIndex &&
-           s.timeBudgetSeconds == kDefaults.timeBudgetSeconds && s.workers == kDefaults.workers &&
+           s.budgetCeilingSeconds == kDefaults.budgetCeilingSeconds &&
+           s.workerOverride == kDefaults.workerOverride &&
            s.captureDiagnostics == kDefaults.captureDiagnostics && s.traceLog == kDefaults.traceLog;
 }
 
@@ -61,10 +62,10 @@ void unusableInputsYieldDefaults() {
         {"null", "null"},
         {"only an opening brace", "{"},
         {"nothing but braces", "{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{"},
-        {"a key with no value", "{\"workers\":}"},
+        {"a key with no value", "{\"workerOverride\":}"},
         {"a value with no key", "{: 4}"},
-        {"single quotes", "{'workers': 4}"},
-        {"unquoted key", "{workers: 4}"},
+        {"single quotes", "{'workerOverride': 4}"},
+        {"unquoted key", "{workerOverride: 4}"},
     };
 
     for (const Case& c : cases) {
@@ -80,8 +81,8 @@ void aGoodFileReadsBack() {
     s.sheetWidthMm = 0.0;  // the unbounded strip, a real setting
     s.partSpacingMm = 3.25;
     s.rotationIndex = 2;
-    s.timeBudgetSeconds = 45;
-    s.workers = 8;
+    s.budgetCeilingSeconds = 45;
+    s.workerOverride = 8;
     s.captureDiagnostics = true;
     s.traceLog = true;
 
@@ -91,8 +92,8 @@ void aGoodFileReadsBack() {
               near(load.values.sheetWidthMm, s.sheetWidthMm) &&
               near(load.values.partSpacingMm, s.partSpacingMm) &&
               load.values.rotationIndex == s.rotationIndex &&
-              load.values.timeBudgetSeconds == s.timeBudgetSeconds &&
-              load.values.workers == s.workers &&
+              load.values.budgetCeilingSeconds == s.budgetCeilingSeconds &&
+              load.values.workerOverride == s.workerOverride &&
               load.values.captureDiagnostics == s.captureDiagnostics &&
               load.values.traceLog == s.traceLog,
           "every field survives a round trip");
@@ -105,27 +106,27 @@ void aGoodFileReadsBack() {
 void partialFilesKeepWhatArrived() {
     // A crash during a write, or a disk that filled up mid-line.
     const SettingsLoad load =
-        parseSettings("{\n  \"workers\": 8,\n  \"captureDiagnostics\": true,\n  \"sheetHeig");
+        parseSettings("{\n  \"workerOverride\": 8,\n  \"captureDiagnostics\": true,\n  \"sheetHeig");
     check(load.recovered, "a truncated file is reported as recovered");
-    check(load.values.workers == 8 && load.values.captureDiagnostics,
+    check(load.values.workerOverride == 8 && load.values.captureDiagnostics,
           "a truncated file keeps the values that made it to disk");
     check(near(load.values.sheetHeightMm, kDefaults.sheetHeightMm),
           "and defaults the one that was cut in half");
 
     // A trailing comma is the single most common hand-edit mistake.
-    const SettingsLoad trailing = parseSettings("{\"workers\": 6,}");
-    check(trailing.recovered && trailing.values.workers == 6,
+    const SettingsLoad trailing = parseSettings("{\"workerOverride\": 6,}");
+    check(trailing.recovered && trailing.values.workerOverride == 6,
           "a trailing comma costs the file nothing but a note");
 }
 
 void wrongTypesFallBackPerField() {
     const SettingsLoad load = parseSettings(
-        "{\"workers\": \"eight\", \"captureDiagnostics\": \"yes\", \"timeBudgetSeconds\": null, "
+        "{\"workerOverride\": \"eight\", \"captureDiagnostics\": \"yes\", \"budgetCeilingSeconds\": null, "
         "\"logLevel\": 4, \"sheetHeightMm\": true, \"partSpacingMm\": 7.5}");
     check(load.recovered, "wrong types are reported");
-    check(load.values.workers == kDefaults.workers &&
+    check(load.values.workerOverride == kDefaults.workerOverride &&
               load.values.captureDiagnostics == kDefaults.captureDiagnostics &&
-              load.values.timeBudgetSeconds == kDefaults.timeBudgetSeconds &&
+              load.values.budgetCeilingSeconds == kDefaults.budgetCeilingSeconds &&
               !load.values.traceLog && near(load.values.sheetHeightMm, kDefaults.sheetHeightMm),
           "each wrong type falls back on its own");
     check(near(load.values.partSpacingMm, 7.5),
@@ -135,49 +136,63 @@ void wrongTypesFallBackPerField() {
 
 void numbersAreClampedNotTrusted() {
     const SettingsLoad high = parseSettings(
-        "{\"workers\": 9999, \"timeBudgetSeconds\": 100000, \"sheetHeightMm\": 1e9, "
+        "{\"workerOverride\": 9999, \"budgetCeilingSeconds\": 100000, \"sheetHeightMm\": 1e9, "
         "\"partSpacingMm\": -5, \"rotationIndex\": 77}");
     check(high.recovered, "out-of-range values are reported");
-    check(high.values.workers == 64 && high.values.timeBudgetSeconds == 600 &&
+    check(high.values.workerOverride == 64 && high.values.budgetCeilingSeconds == 3600 &&
               near(high.values.sheetHeightMm, 100000.0) && near(high.values.partSpacingMm, 0.0) &&
               high.values.rotationIndex == 3,
           "every out-of-range value is clamped to what the dialog accepts");
 
     // 1e300 into an int is undefined behaviour if the clamp happens after the
     // cast rather than before it.
-    const SettingsLoad absurd = parseSettings("{\"workers\": 1e300, \"rotationIndex\": -1e300}");
-    check(absurd.values.workers == 64 && absurd.values.rotationIndex == 0,
+    const SettingsLoad absurd = parseSettings("{\"workerOverride\": 1e300, \"rotationIndex\": -1e300}");
+    check(absurd.values.workerOverride == 64 && absurd.values.rotationIndex == 0,
           "a value far outside int range clamps without a cast");
 
     // NaN and Infinity are not JSON, so these are parse failures rather than
     // non-finite values -- but either way nothing non-finite may escape.
     const SettingsLoad nan = parseSettings("{\"sheetHeightMm\": NaN}");
     check(allDefault(nan.values) && nan.recovered, "NaN is not accepted as a number");
-    const SettingsLoad inf = parseSettings("{\"workers\": Infinity}");
+    const SettingsLoad inf = parseSettings("{\"workerOverride\": Infinity}");
     check(allDefault(inf.values) && inf.recovered, "Infinity is not accepted as a number");
 
-    const SettingsLoad fractional = parseSettings("{\"workers\": 4.7}");
-    check(fractional.values.workers == 5, "a fractional count rounds rather than truncating");
+    const SettingsLoad fractional = parseSettings("{\"workerOverride\": 4.7}");
+    check(fractional.values.workerOverride == 5, "a fractional count rounds rather than truncating");
 
-    const SettingsLoad malformed = parseSettings("{\"workers\": 1.2.3}");
-    check(malformed.values.workers == kDefaults.workers,
+    const SettingsLoad malformed = parseSettings("{\"workerOverride\": 1.2.3}");
+    check(malformed.values.workerOverride == kDefaults.workerOverride,
           "a number that only starts out valid is refused whole");
 }
 
 void toleratesWhatAnotherBuildMightWrite() {
     const SettingsLoad unknown =
-        parseSettings("{\"workers\": 6, \"somethingNewer\": 12, \"nested\": {\"a\": [1, {\"b\": "
+        parseSettings("{\"workerOverride\": 6, \"somethingNewer\": 12, \"nested\": {\"a\": [1, {\"b\": "
                       "2}]}, \"list\": [1, 2, 3], \"captureDiagnostics\": true}");
     check(!unknown.recovered && unknown.notes.empty(),
           "unknown keys, nested objects and arrays are not errors");
-    check(unknown.values.workers == 6 && unknown.values.captureDiagnostics,
+    check(unknown.values.workerOverride == 6 && unknown.values.captureDiagnostics,
           "and the keys this build knows are still read past them");
 
-    const SettingsLoad bom = parseSettings("\xEF\xBB\xBF{\"workers\": 3}");
-    check(!bom.recovered && bom.values.workers == 3, "a UTF-8 BOM is skipped");
+    // The dialog's old time-budget spinner wrote values as low as 1, which was
+    // a budget then and would be a crippling ceiling now. The key was renamed
+    // rather than migrated, so this is the whole of the migration: an old
+    // file's value is unknown, ignored, and NOT an error worth a note.
+    const SettingsLoad stale = parseSettings(
+        "{\"timeBudgetSeconds\": 1, \"workers\": 4, \"partSpacingMm\": 3.5}");
+    check(!stale.recovered && stale.notes.empty(),
+          "a previous build's timeBudgetSeconds and workers are not errors");
+    check(stale.values.budgetCeilingSeconds == kDefaults.budgetCeilingSeconds,
+          "and the old budget cannot hold the new ceiling down");
+    check(stale.values.workerOverride == kDefaults.workerOverride,
+          "and the old worker count cannot switch auto off");
+    check(near(stale.values.partSpacingMm, 3.5), "while its still-valid keys are read");
 
-    const SettingsLoad dup = parseSettings("{\"workers\": 2, \"workers\": 9}");
-    check(dup.values.workers == 9, "a duplicate key takes the last value");
+    const SettingsLoad bom = parseSettings("\xEF\xBB\xBF{\"workerOverride\": 3}");
+    check(!bom.recovered && bom.values.workerOverride == 3, "a UTF-8 BOM is skipped");
+
+    const SettingsLoad dup = parseSettings("{\"workerOverride\": 2, \"workerOverride\": 9}");
+    check(dup.values.workerOverride == 9, "a duplicate key takes the last value");
 
     const SettingsLoad escapes = parseSettings("{\"logLevel\": \"tr\\u0061ce\"}");
     check(escapes.recovered && !escapes.values.traceLog,
@@ -253,12 +268,12 @@ void theFileOnDiskBehaves() {
           "a first run finds no file and reports no damage");
 
     Settings s;
-    s.workers = 11;
+    s.workerOverride = 11;
     s.captureDiagnostics = true;
     check(saveSettings(s), "settings can be written");
 
     const SettingsLoad back = loadSettings();
-    check(back.fileFound && !back.recovered && back.values.workers == 11 &&
+    check(back.fileFound && !back.recovered && back.values.workerOverride == 11 &&
               back.values.captureDiagnostics,
           "and read back");
 
@@ -268,10 +283,10 @@ void theFileOnDiskBehaves() {
     // A corrupt file is kept as evidence rather than quietly replaced.
     {
         std::ofstream f(userDataPath("settings.json"), std::ios::trunc);
-        f << "{\"workers\": ";
+        f << "{\"workerOverride\": ";
     }
     const SettingsLoad broken = loadSettings();
-    check(broken.recovered && broken.values.workers == kDefaults.workers,
+    check(broken.recovered && broken.values.workerOverride == kDefaults.workerOverride,
           "a corrupt file loads as defaults");
     check(std::filesystem::exists(userDataPath("settings.json.bad"), ec),
           "and is moved aside as settings.json.bad");
