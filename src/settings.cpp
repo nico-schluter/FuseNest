@@ -420,18 +420,28 @@ SettingsLoad loadSettings() {
         return load;
     }
 
-    std::ifstream f(path, std::ios::binary);
-    if (!f) {
-        load.fileFound = true;
-        load.recovered = true;
-        load.notes.push_back("the settings file could not be opened; using defaults");
-        return load;
+    // Scoped so the handle is CLOSED before the rename below, exactly as the
+    // save path scopes its ofstream. POSIX will happily rename a file that is
+    // still open and Windows will not: MoveFileEx fails with a sharing
+    // violation, so on Windows the corrupt file was never moved aside and the
+    // note claimed it could not be. The read is the only thing that needs the
+    // stream, so the block ends as soon as the text is out.
+    std::string text;
+    {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) {
+            load.fileFound = true;
+            load.recovered = true;
+            load.notes.push_back("the settings file could not be opened; using defaults");
+            return load;
+        }
+        std::ostringstream buf;
+        buf << f.rdbuf();
+        // A read that fails partway leaves whatever arrived, and the parser's
+        // own partial recovery handles it from there.
+        text = buf.str();
     }
-    std::ostringstream buf;
-    buf << f.rdbuf();
-    // A read that fails partway leaves whatever arrived, and the parser's own
-    // partial recovery handles it from there.
-    load = parseSettings(buf.str());
+    load = parseSettings(text);
 
     if (load.recovered) {
         // Moved aside rather than left to be overwritten by the next save: if
