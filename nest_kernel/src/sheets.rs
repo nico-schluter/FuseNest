@@ -31,6 +31,13 @@
 //! checking it fits on that sheet is a comparison, both on the inflated bbox
 //! that `PlacedItem::shape` already carries.
 //!
+//! That `s/2` is in THIS frame and is not a physical clearance, which is a
+//! substitution easily made. The boundary here is the deflated container face
+//! (or the separator's inflated face), already `s/2` in from the stock, so a
+//! flush part's real outline stands `s` -- the full spacing -- off the material
+//! edge, the same as it stands off its neighbours. The gap the user asked for
+//! is uniform; only the bookkeeping is halved.
+//!
 //! # Sheet count is an output
 //!
 //! A strip packing problem places EVERY item; its width is the answer, not a

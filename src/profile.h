@@ -73,7 +73,38 @@ struct ExtractOptions {
     double toleranceMm = 0.05;
 };
 
-/// One reason a selection cannot be nested at all.
+/// What is wrong with a selection, coarse enough to say in a sentence.
+///
+/// The kind exists for the setup pane, which has room for names and not for
+/// mechanism: it groups the issues by kind and writes one sentence per group,
+/// so five unnestable bodies and one nested component read as two lines rather
+/// than six. The fine-grained `reason` is still what the log and the refusal
+/// print, so nothing is lost -- only deferred to where there is room for it.
+///
+/// Declaration order is the order the pane lists them in, and the blocking
+/// kinds come first so the thing that greys out OK is the thing at the top.
+enum class IssueKind {
+    /// The outline is not one rigid piece: separate regions, or a pinch.
+    Geometry,
+    /// An instance inside another instance, whose placement would not hold.
+    NotInRoot,
+    /// An instance with sub-components, whose geometry is outside its outline.
+    HasChildren,
+    /// An instance with no solid body in it to project.
+    NoBody,
+    /// An instance holding several bodies, which one placement cannot carry.
+    ManyBodies,
+    /// ADVISORY: grounds, joints or rigid groups that write-back will delete
+    /// to make room for the placement. Not a refusal -- the nest is correct
+    /// either way -- but it changes the user's model, so it is said in advance.
+    Constraints,
+};
+
+/// False for the kinds that only warn. Kept here rather than at the call site
+/// so the dialog's OK gating and the pane's colouring cannot drift apart.
+bool blocks(IssueKind kind);
+
+/// One thing wrong with one selection.
 ///
 /// Name and reason are kept apart rather than pre-joined because the two
 /// consumers phrase them differently: the setup dialog leads with the names so
@@ -83,7 +114,11 @@ struct ExtractOptions {
 struct NestIssue {
     std::string name;
     std::string reason;
+    IssueKind kind = IssueKind::Geometry;
 };
+
+/// True when at least one issue in the list stops the nest from running.
+bool anyBlocking(const std::vector<NestIssue>& issues);
 
 struct ExtractResult {
     std::vector<Profile> profiles;
@@ -110,6 +145,11 @@ ExtractResult extractProfiles(const adsk::core::Ptr<adsk::core::Application>& ap
 
 /// Applies the same nestability rules as `extractProfiles` without reading any
 /// outlines, so the setup dialog can say no before the user commits.
+///
+/// Returns advisory issues as well as refusals -- a constrained instance nests
+/// fine, but applying the layout deletes what holds it, and the dialog is the
+/// last place that can be said before it happens. Callers gate OK on
+/// `anyBlocking`, not on emptiness.
 ///
 /// It still has to project each unit -- a pinched silhouette is only visible in
 /// the projection, and the body's own lump count cannot reveal it -- but it

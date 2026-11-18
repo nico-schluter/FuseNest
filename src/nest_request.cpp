@@ -8,10 +8,10 @@ namespace fusenest {
 
 const char* rotationModeLabel(RotationMode mode) {
     switch (mode) {
-        case RotationMode::None: return "Fixed (0 degrees)";
-        case RotationMode::Half: return "0 / 180 degrees";
-        case RotationMode::Quarter: return "90 degree steps";
-        default: return "Continuous";
+        case RotationMode::None: return "Fixed";
+        case RotationMode::Half: return "180° steps";
+        case RotationMode::Quarter: return "90° steps";
+        default: return "Free";
     }
 }
 

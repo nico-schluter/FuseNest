@@ -7,7 +7,7 @@
     },
     "version": "@PROJECT_VERSION@",
 @FUSENEST_MANIFEST_ID_LINE@    "supportedOS": "windows|mac",
-    "runOnStartup": false,
+    "runOnStartup": true,
     "editEnabled": false,
     "iconFilename": "AddInIcon.svg"
 }

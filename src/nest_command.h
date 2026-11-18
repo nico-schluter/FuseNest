@@ -1,12 +1,12 @@
-// The FuseNest command: a button in the Add-Ins panel, a dialog that gathers a
-// nesting job, and an execute handler that turns it into solver input.
+// The FuseNest command: a button in the Solid tab's Modify panel, a dialog that
+// gathers a nesting job, and an execute handler that turns it into solver input.
 #pragma once
 
 #include <Core/CoreAll.h>
 
 namespace fusenest {
 
-/// Creates the command definition and puts it in the Add-Ins panel.
+/// Creates the command definition and puts it in the Solid tab's Modify panel.
 /// Returns false and logs on failure.
 bool registerNestCommand(const adsk::core::Ptr<adsk::core::Application>& app);
 

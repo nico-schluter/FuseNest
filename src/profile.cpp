@@ -140,8 +140,10 @@ void classifyInstance(const Ptr<Occurrence>& occ, Collected& out) {
     // same path reaches here from a body picked inside a sub-component.
     if (occ->assemblyContext()) {
         out.rejected.push_back(
-            NestIssue{name, "is a component inside another component, so its placement would "
-                            "not hold; nest the top-level instance instead"});
+            NestIssue{name,
+                      "is a component inside another component, so its placement would "
+                      "not hold; nest the top-level instance instead",
+                      IssueKind::NotInRoot});
         return;
     }
 
@@ -152,9 +154,11 @@ void classifyInstance(const Ptr<Occurrence>& occ, Collected& out) {
     const size_t childCount = children ? children->count() : 0;
     if (childCount > 0) {
         out.rejected.push_back(NestIssue{
-            name, "contains " + std::to_string(childCount) + " more component" +
-                      (childCount == 1 ? "" : "s") +
-                      ", whose geometry would move with it but is not in its outline"});
+            name,
+            "contains " + std::to_string(childCount) + " more component" +
+                (childCount == 1 ? "" : "s") +
+                ", whose geometry would move with it but is not in its outline",
+            IssueKind::HasChildren});
         return;
     }
 
@@ -168,7 +172,8 @@ void classifyInstance(const Ptr<Occurrence>& occ, Collected& out) {
                 if (b->isSolid()) solids.push_back(b);
 
     if (solids.empty()) {
-        out.rejected.push_back(NestIssue{name, "has no solid body in it to nest"});
+        out.rejected.push_back(
+            NestIssue{name, "has no solid body in it to nest", IssueKind::NoBody});
         return;
     }
     // Refused rather than nested as the union of its bodies, for the reason at
@@ -176,8 +181,10 @@ void classifyInstance(const Ptr<Occurrence>& occ, Collected& out) {
     // outlines moving with one instance would compose into neither of them.
     if (solids.size() > 1) {
         out.rejected.push_back(NestIssue{
-            name, "holds " + std::to_string(solids.size()) +
-                      " solid bodies, and an instance can only be nested when it holds one"});
+            name,
+            "holds " + std::to_string(solids.size()) +
+                " solid bodies, and an instance can only be nested when it holds one",
+            IssueKind::ManyBodies});
         return;
     }
 
@@ -265,7 +272,43 @@ bool nestableAsOneItem(const Ptr<BRepBody>& body, size_t faceCount, std::string&
     return false;
 }
 
+/// How many things are holding an instance where it is.
+///
+/// This is the set write-back deletes (`releaseInstance`), counted rather than
+/// touched: a placement is a position, and anything fixing the position has to
+/// give way for the layout to mean anything. Counting it here is what lets the
+/// dialog say so BEFORE the user presses Nest, which is the only point at which
+/// they can still decide they would rather keep the joint.
+///
+/// Deliberately not a refusal. The nest is correct either way -- the part lands
+/// where the layout put it -- so this is the one thing the pane says that does
+/// not grey out OK.
+int constraintsHolding(const Ptr<Occurrence>& occ) {
+    if (!occ) return 0;
+
+    int held = 0;
+    // Grounding has no timeline entry of its own, so it counts as one hold
+    // each rather than as a list.
+    if (occ->isGrounded()) ++held;
+    if (occ->isGroundToParent()) ++held;
+    // Same three lists write-back walks, and joints() is again the joints that
+    // affect THIS occurrence's position -- the set that would fight a placement.
+    if (Ptr<JointList> joints = occ->joints()) held += static_cast<int>(joints->count());
+    if (Ptr<AsBuiltJointList> built = occ->asBuiltJoints())
+        held += static_cast<int>(built->count());
+    if (Ptr<RigidGroupList> rigid = occ->rigidGroups()) held += static_cast<int>(rigid->count());
+    return held;
+}
+
 }  // namespace
+
+bool blocks(IssueKind kind) { return kind != IssueKind::Constraints; }
+
+bool anyBlocking(const std::vector<NestIssue>& issues) {
+    for (const NestIssue& issue : issues)
+        if (blocks(issue.kind)) return true;
+    return false;
+}
 
 ExtractResult extractProfiles(const Ptr<Application>& app,
                               const std::vector<Ptr<Base>>& selections,
@@ -318,7 +361,7 @@ ExtractResult extractProfiles(const Ptr<Application>& app,
         // as one that simply refused to move -- with a success report next to it.
         std::string reason;
         if (!nestableAsOneItem(body, faceCount, reason)) {
-            result.blockers.push_back(NestIssue{name, reason});
+            result.blockers.push_back(NestIssue{name, reason, IssueKind::Geometry});
             continue;
         }
 
@@ -396,8 +439,21 @@ std::vector<NestIssue> validateSelections(const Ptr<Application>& app,
 
         Ptr<BRepFaces> faces = outline->faces();
         std::string reason;
-        if (!nestableAsOneItem(unit.geometry, faces ? faces->count() : 1, reason))
-            issues.push_back(NestIssue{unit.name, reason});
+        if (!nestableAsOneItem(unit.geometry, faces ? faces->count() : 1, reason)) {
+            issues.push_back(NestIssue{unit.name, reason, IssueKind::Geometry});
+            continue;
+        }
+
+        // Only for a unit that will actually be nested, and only for an
+        // instance: a root body carries no joints, and warning about what will
+        // be deleted from something that is being refused anyway is noise.
+        const int held = constraintsHolding(unit.instance);
+        if (held > 0)
+            issues.push_back(NestIssue{
+                unit.name,
+                "is held by " + std::to_string(held) + " constraint" +
+                    (held == 1 ? "" : "s") + ", which applying the layout will delete",
+                IssueKind::Constraints});
     }
     return issues;
 }

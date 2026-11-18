@@ -10,3 +10,14 @@ fusenest_solution.json
 nest*.svg
 .DS_Store
 *.dSYM/
+
+# marketing/ renders. animate_logo.py regenerates every one of these from
+# fusenest.svg, which is the only input: `preview` writes fusenest_anim.svg and
+# preview.html, `video --out <file>` encodes each of the four. Sources are
+# tracked; renders are not. The .mov alone is 196MB of ProRes, and a render
+# committed once stays in the history for good.
+marketing/fusenest_anim.svg
+marketing/preview.html
+marketing/fusenest_logo.*
+marketing/frames/
+marketing/venv/

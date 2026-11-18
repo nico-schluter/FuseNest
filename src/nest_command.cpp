@@ -16,6 +16,7 @@
 
 #include <Fusion/FusionAll.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -35,7 +36,10 @@ const char* kCmdId = "FuseNestCommand";
 // and a command's execute handler is the only thing it groups into one undo
 // step, so the write-back has to happen in here.
 const char* kResultCmdId = "FuseNestResultCommand";
-const char* kPanelId = "SolidScriptsAddinsPanel";
+// Solid > Modify, which is where v1 put the button. It is a modelling
+// operation on bodies the user has already got, not a utility, and this is the
+// panel their hand already goes to.
+const char* kPanelId = "SolidModifyPanel";
 
 // Fusion's internal length unit is centimetres, and ValueCommandInput::value()
 // returns internal units regardless of what the dialog displays. Convert at the
@@ -87,7 +91,7 @@ struct SavedSetup {
     double sheetHeightMm = 0.0;
     double sheetWidthMm = 0.0;
     double partSpacingMm = 0.0;
-    int rotationIndex = 1;
+    int rotationIndex = 0;  // dialog order; 0 is Free. See Settings.
     bool captureDiagnostics = false;
     std::vector<std::string> partTokens;
 };
@@ -159,6 +163,21 @@ PendingJob g_pending;
 /// The difference matters: settings are worth carrying into a fresh invocation,
 /// but silently reselecting bodies someone did not pick would be startling.
 bool g_restoreSelections = false;
+
+/// Set while `restoreSetupSelections` is adding selections in code, to keep the
+/// live check from running once per `addSelection`.
+///
+/// It has to exist because `addSelection` DOES fire inputChanged -- a comment
+/// on `refreshSetupIssues` claimed otherwise for a long time, and the cost of
+/// believing it was quadratic: each add revalidated every selection added so
+/// far, and every check projects every selected body. 29 parts measured 29
+/// checks and 1.54s on reopen, against 105ms for the same 29 picked in one
+/// window-select, which Fusion delivers as a single event. The restore loop is
+/// the only thing in the dialog that adds selections one at a time at scale.
+///
+/// The single check that the restored set needs is the one `ActivateHandler`
+/// runs after the loop.
+bool g_suppressSetupCheck = false;
 
 /// The live result command, while one is open. A CustomEvent handler gets no
 /// Command pointer and ui->activeCommand() yields only an id string, so the
@@ -353,11 +372,16 @@ bool refreshResultDialog() {
     return true;
 }
 
+/// Dropdown position to mode. The dialog lists the modes least-constrained
+/// first, so this is deliberately NOT the enum order and the two cannot be
+/// collapsed into a cast. Settings::rotationIndex stores this index, so a
+/// reorder here is a settings migration -- see the note on that field.
 RotationMode rotationFromIndex(int index) {
     switch (index) {
-        case 0: return RotationMode::None;
-        case 1: return RotationMode::Half;
-        case 2: return RotationMode::Quarter;
+        case 0: return RotationMode::Continuous;
+        case 1: return RotationMode::Quarter;
+        case 2: return RotationMode::Half;
+        case 3: return RotationMode::None;
         default: return RotationMode::Continuous;
     }
 }
@@ -503,6 +527,37 @@ class ResultExecuteHandler : public CommandEventHandler {
         }
     }
 };
+
+/// The folder holding the button artwork, shipped beside the binary.
+///
+/// Absolute, for the same reason helpFile is: a relative path is resolved
+/// against Fusion's working directory, which is somewhere in the
+/// installation. Fusion chooses the file inside by name and resolution, so
+/// what is named here is the folder and never a single png.
+///
+/// Empty when the folder is not there, which is what the API's own default
+/// is -- a build that forgot to stage it gets the generic button rather than
+/// a button with a missing image in it.
+std::string commandIconFolder() {
+    const std::string folder = addinPath("resources/icons");
+    if (folder.empty()) return {};
+    std::error_code ec;
+    if (!std::filesystem::is_directory(folder, ec)) {
+        logLine("icon folder missing: " + folder);
+        return {};
+    }
+    return folder;
+}
+
+/// The tool clip: the image the tooltip grows into when the cursor rests on
+/// the button. Empty when it is not there, which the API reads as "no clip".
+std::string commandToolClip() {
+    const std::string clip = addinPath("resources/icons/description.png");
+    if (clip.empty()) return {};
+    std::error_code ec;
+    if (!std::filesystem::exists(clip, ec)) return {};
+    return clip;
+}
 
 /// The F1 page, shipped beside the binary.
 ///
@@ -1173,6 +1228,12 @@ void restoreSetupSelections(const Ptr<CommandInputs>& inputs) {
     if (!sel || !design) return;
 
     int restored = 0, missing = 0, ambiguous = 0;
+    // Held across the whole loop, not per add: the check costs the same whether
+    // it runs on the 1st add or the 29th, so the only cheap number of them is
+    // none. Nothing between here and the reset returns or throws -- the Fusion
+    // API reports failure by null and false -- so a scope guard would be
+    // machinery for a span that cannot be left early.
+    g_suppressSetupCheck = true;
     for (const std::string& token : g_saved.partTokens) {
         std::vector<Ptr<Base>> found = design->findEntityByToken(token);
         if (found.empty()) {
@@ -1186,6 +1247,8 @@ void restoreSetupSelections(const Ptr<CommandInputs>& inputs) {
         if (found.size() > 1) ++ambiguous;
         if (sel->addSelection(found[0])) ++restored;
     }
+
+    g_suppressSetupCheck = false;
 
     logLine("restored " + std::to_string(restored) + " of " +
             std::to_string(g_saved.partTokens.size()) + " selections" +
@@ -1202,42 +1265,112 @@ void restoreSetupSelections(const Ptr<CommandInputs>& inputs) {
                            "FuseNest");
 }
 
-/// The red line under the inputs: names only, one sentence.
+/// What each kind of issue is called in the pane, singular and plural.
 ///
-/// The command pane is narrow enough to fit three or four words per line and
-/// scrolls after about four lines, so there is no room to explain anything
-/// here. The names are what the user acts on -- deselect or repair one of them
-/// -- and the reason for each is in the log, written by refreshSetupIssues.
-/// Beyond three names the list is abbreviated rather than wrapped: a paragraph
-/// of names in a scrolling box is less readable than a count.
-std::string issuesHtml(const std::vector<NestIssue>& issues) {
-    if (issues.empty()) return "";
+/// Phrased as the predicate of a sentence whose subject is the list of names,
+/// so the pane can write "Body1, Body3 and 5 more produced invalid geometry."
+/// without knowing anything about what went wrong. Only the verb differs
+/// between the two forms; they are both written out rather than inflected,
+/// because a rule that only ever adds "s" is a rule waiting to be wrong.
+///
+/// These say what the user can see in their own model -- where a component sits
+/// and what is inside it -- not what the code found, which is in the log. The
+/// fine-grained reason in NestIssue is that text; this is its headline.
+struct IssuePhrase {
+    const char* one;
+    const char* many;
+};
 
-    const size_t shown = issues.size() <= 3 ? issues.size() : 2;
+IssuePhrase phraseFor(IssueKind kind) {
+    switch (kind) {
+        case IssueKind::Geometry:
+            return {"produced invalid geometry", "produced invalid geometry"};
+        case IssueKind::NotInRoot:
+            return {"must be in the root component", "must be in the root component"};
+        case IssueKind::HasChildren:
+            return {"cannot have child components", "cannot have child components"};
+        case IssueKind::NoBody:
+            return {"has no solid body to nest", "have no solid body to nest"};
+        case IssueKind::ManyBodies:
+            return {"holds more than one solid body", "hold more than one solid body"};
+        case IssueKind::Constraints:
+            return {"has constraints that will break when moved",
+                    "have constraints that will break when moved"};
+    }
+    return {"cannot be nested", "cannot be nested"};
+}
+
+/// The pane lists the kinds in this order, blocking ones first.
+constexpr IssueKind kIssueOrder[] = {
+    IssueKind::Geometry, IssueKind::NotInRoot,   IssueKind::HasChildren,
+    IssueKind::NoBody,   IssueKind::ManyBodies,  IssueKind::Constraints,
+};
+
+/// The subject of one of those sentences: the names, in bold, abbreviated.
+///
+/// Beyond three names the list is cut rather than wrapped -- a paragraph of
+/// names in a box that scrolls after a few lines is less readable than a count,
+/// and the full list with a reason each is in the log either way.
+std::string namesHtml(const std::vector<const NestIssue*>& group) {
+    const size_t shown = group.size() <= 3 ? group.size() : 2;
 
     std::ostringstream os;
-    os << R"(<div style="color:#c0392b">)";
     for (size_t i = 0; i < shown; ++i) {
-        if (i) os << (i + 1 == shown && shown == issues.size() ? " and " : ", ");
+        if (i) os << (i + 1 == shown && shown == group.size() ? " and " : ", ");
         // Escaped: this is a component name going inside a tag, and a part
         // called "Frame & Panel" or "Bracket <rev2>" would otherwise lose the
         // part of its name that makes it findable.
-        os << "<b>" << htmlEscape(issues[i].name) << "</b>";
+        os << "<b>" << htmlEscape(group[i]->name) << "</b>";
     }
-    if (shown < issues.size()) os << " and " << (issues.size() - shown) << " more";
-    // "cannot be nested" rather than anything about geometry: not every blocker
-    // is a geometry problem. A component with two bodies in it has a perfectly
-    // good outline and is refused over its structure. Saying which kind each
-    // one is needs a line per kind, which is the grouping the mode dropdown
-    // brings with it; until then the shared sentence has to be one that is true
-    // of all of them.
-    os << " cannot be nested.</div>";
+    if (shown < group.size()) os << " and " << (group.size() - shown) << " more";
+    return os.str();
+}
+
+/// The lines under the inputs: one sentence per kind of problem.
+///
+/// Grouped by kind rather than listed per selection, because the sentence is
+/// the useful part and it is the same for every name in a group. One flat list
+/// could only end in something true of all of them at once -- "cannot be
+/// nested" -- which told the user nothing about what to do next. Six bodies
+/// with pinched silhouettes and one component holding two bodies are two
+/// different repairs, and now they read as two lines.
+///
+/// `lines` comes back as the number of sentences, so the caller can grow the
+/// textbox to fit instead of scrolling a message three words at a time.
+std::string issuesHtml(const std::vector<NestIssue>& issues, int* lines) {
+    if (lines) *lines = 0;
+    if (issues.empty()) return "";
+
+    std::ostringstream os;
+    int written = 0;
+    for (IssueKind kind : kIssueOrder) {
+        std::vector<const NestIssue*> group;
+        for (const NestIssue& issue : issues)
+            if (issue.kind == kind) group.push_back(&issue);
+        if (group.empty()) continue;
+
+        const IssuePhrase phrase = phraseFor(kind);
+        // Agreement follows the number of NAMES, not the abbreviated list: "A,
+        // B and 4 more" is still plural even though it shows three subjects.
+        const char* verb = group.size() == 1 ? phrase.one : phrase.many;
+        // Red for what stops the nest, amber for what merely changes the model.
+        // The colours are literal because a command input's formatted text is
+        // an HTML fragment with no stylesheet of its own; both are chosen to
+        // stay legible on Fusion's light and dark themes.
+        os << R"(<div style="color:)" << (blocks(kind) ? "#c0392b" : "#b06000") << R"(">)"
+           << namesHtml(group) << " " << verb << ".</div>";
+        ++written;
+    }
+
+    if (lines) *lines = written;
     return os.str();
 }
 
 /// Reruns the check and shows or hides the textbox. Called on every selection
-/// change and once on activate, since selections restored in code do not fire
-/// inputChanged.
+/// change the user makes, and once on activate for a restored set -- whose own
+/// adds are suppressed rather than relied on to be silent, because
+/// `addSelection` fires inputChanged like any other change. See
+/// g_suppressSetupCheck.
 void refreshSetupIssues(const Ptr<CommandInputs>& inputs) {
     if (!inputs) return;
 
@@ -1253,19 +1386,30 @@ void refreshSetupIssues(const Ptr<CommandInputs>& inputs) {
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     logDiag("setup check: " + std::to_string(req.parts.size()) + " selections in " +
             std::to_string(static_cast<long>(ms)) + " ms, " +
-            std::to_string(g_setupIssues.size()) + " rejected");
+            std::to_string(g_setupIssues.size()) + " issues");
 
     Ptr<TextBoxCommandInput> tb = inputs->itemById(kInIssues);
     if (!tb) return;
     const bool any = !g_setupIssues.empty();
     // Text first, then visibility: writing into a hidden input is cheap, and
     // showing one that still holds the previous message flashes it.
-    if (any) tb->formattedText(issuesHtml(g_setupIssues));
+    if (any) {
+        int lines = 0;
+        const std::string html = issuesHtml(g_setupIssues, &lines);
+        // Two rows per sentence, since the names wrap in a pane this narrow,
+        // and capped so the pane cannot push the inputs off the dialog -- past
+        // the cap it scrolls, which is the old behaviour for the overflow only.
+        tb->numRows(std::min(std::max(lines * 2, 2), 8));
+        tb->formattedText(html);
+    }
     tb->isVisible(any);
 
+    // One line per issue with its own reason, which is the detail the pane
+    // dropped in favour of a sentence a user can act on.
     if (any)
         for (const auto& issue : g_setupIssues)
-            logLine("setup rejects " + issue.name + ": " + issue.reason);
+            logLine(std::string(blocks(issue.kind) ? "setup rejects " : "setup warns about ") +
+                    issue.name + ": " + issue.reason);
 }
 
 class ActivateHandler : public CommandEventHandler {
@@ -1288,6 +1432,9 @@ class InputChangedHandler : public InputChangedEventHandler {
         // Only the selection can change the answer, and the check projects every
         // selected body -- so spinners and the unit fields must not trigger it.
         if (!changed || changed->id() != kInParts) return;
+        // The restore loop adds one selection per call and each one fires here;
+        // its own single check follows the loop. See g_suppressSetupCheck.
+        if (g_suppressSetupCheck) return;
         refreshSetupIssues(args->inputs());
     }
 };
@@ -1300,7 +1447,8 @@ class ValidateHandler : public ValidateInputsEventHandler {
         // Greys out OK rather than failing later with a confusing message.
         // g_setupIssues is read, not recomputed: this fires on every keystroke.
         args->areInputsValid(!req.parts.empty() && req.sheetHeightMm > 0.0 &&
-                             req.sheetWidthMm >= 0.0 && req.partSpacingMm >= 0.0 && g_setupIssues.empty());
+                             req.sheetWidthMm >= 0.0 && req.partSpacingMm >= 0.0 &&
+                             !anyBlocking(g_setupIssues));
     }
 };
 
@@ -1344,35 +1492,112 @@ class CreatedHandler : public CommandCreatedEventHandler {
             sel->addSelectionFilter("SolidBodies");
             sel->addSelectionFilter("Occurrences");
             sel->setSelectionLimits(1, 0);  // at least one, no upper bound
+            // The third argument above is the PROMPT, which Fusion shows while
+            // the selection is live; it already says what to pick, so the
+            // tooltip says what will be turned away rather than repeating it.
+            // Kinds, not mechanism: the five refusals in profile.cpp collapse
+            // into three things a user can see in their own model.
+            sel->tooltip("Select bodies and components to nest.");
+            sel->tooltipDescription(
+                "Nested components, components with no or multiple bodies, and bodies with "
+                "degenerate geometry are rejected; the panel below names each one.<br>"
+                "Holes are ignored. A part is nested as its outer outline, so nothing is "
+                "placed inside a hole.");
         }
 
         // Units are pinned to mm rather than the design's default length unit:
         // UnitsManager has no defaultLengthUnits() accessor in C++ despite its
         // own doc comment referring to one.
-        inputs->addValueInput(kInSheetHeight, "Sheet height", "mm",
-                              ValueInput::createByReal(1000.0 * kMmToCm));
         // Zero means unbounded, which is the coil case and was the only case
-        // before sheets. Nothing in the dialog says so better than the tooltip,
-        // because a value input has no "off" state to show.
+        // before sheets.
         if (Ptr<ValueCommandInput> w =
                 inputs->addValueInput(kInSheetWidth, "Sheet width", "mm",
                                       ValueInput::createByReal(2000.0 * kMmToCm))) {
-            w->tooltip("Zero nests onto an unbounded strip instead of sheets.");
+            // Zero stays in the ALWAYS-shown tier rather than the description,
+            // which Fusion only reveals once the pointer rests: there is no
+            // "off" state a value input can show for itself, so this is the one
+            // fact here that cannot afford to be progressive.
+            w->tooltip("Width of the sheet to nest on, or zero for an unbounded strip.");
+            w->tooltipDescription(
+                "For best results make this the longer of the sheet's two dimensions. The "
+                "width is the dimension the solver minimises; the height is the room it "
+                "has to work in.<br>"
+                "Zero nests onto one continuous strip instead of sheets, which is what you "
+                "want when the stock is a coil rather than a sheet.");
+        }
+        // WHY THE SHORTER DIMENSION BELONGS HERE. The height is the fixed one:
+        // it becomes jagua-rs's strip_height, and what the solver minimises is
+        // the width. So the height decides how many columns a given part area
+        // has to form, and the column count decides whether the objective has a
+        // gradient at all. In the degenerate case -- a height so tall that the
+        // parts make a single vertical column -- the width is just that of the
+        // widest part, and moving any smaller part cannot change the score. The
+        // shorter the height, the more columns, the more placements that
+        // actually trade off against each other.
+        if (Ptr<ValueCommandInput> h = inputs->addValueInput(
+                kInSheetHeight, "Sheet height", "mm",
+                ValueInput::createByReal(1000.0 * kMmToCm))) {
+            h->tooltip("Height of the sheet to nest on.");
+            h->tooltipDescription(
+                "For best results make this the shorter of the sheet's two dimensions.<br>"
+                "The solver nests by shrinking the width, so the height decides how many "
+                "columns the parts have to form. A height tall enough that they form a "
+                "single column leaves nothing to optimise: the width is then just that of "
+                "the widest part, and moving the smaller parts cannot improve it.");
         }
         // There is deliberately no sheet COUNT here. A count the user sets is a
         // count that can bind, and a nest held to too few sheets is solving a
         // different problem -- see NkSheets. The kernel allocates enough to
         // spill onto and the result says how many sheets it came to.
-        inputs->addValueInput(kInSpacing, "Part spacing", "mm",
-                              ValueInput::createByReal(2.0 * kMmToCm));
+        // ONE number, and the tooltip is right to say so. jagua-rs grows every
+        // outline by s/2 and deflates the container by s/2
+        // (jagua-rs/src/probs/spp/io/import.rs: usable_height = height - s), and
+        // the separator ring is the gap rectangle, so it too presents an inflated
+        // face s/2 proud of the physical boundary. Both offsets push the same way
+        // at every kind of edge, which lands the real outline s from the stock:
+        // part-to-part, part-to-strip-edge, part-to-sheet-boundary, all s.
+        //
+        // Do not take the "s/2 inside it" in sheets.rs's header for a physical
+        // clearance: that frame is INFLATED-SHAPE coordinates, where the boundary
+        // is the deflated container face, already s/2 in from the stock.
+        if (Ptr<ValueCommandInput> sp = inputs->addValueInput(
+                kInSpacing, "Part spacing", "mm",
+                ValueInput::createByReal(2.0 * kMmToCm))) {
+            sp->tooltip("Spacing between parts, and between parts and the sheet edge.");
+            sp->tooltipDescription(
+                "Every outline is grown by half the spacing and the sheet shrunk by the "
+                "same, so the gap comes out the same everywhere: between two parts, at the "
+                "edge of the sheet, and at the boundary between one sheet and the next.<br>"
+                "It is a hard constraint on the layout rather than something trimmed in "
+                "afterwards, so it holds exactly, to within the tolerance of the outlines "
+                "extracted from the model.");
+        }
 
         Ptr<DropDownCommandInput> rot = inputs->addDropDownCommandInput(
             kInRotation, "Rotation", DropDownStyles::TextListDropDownStyle);
         if (Ptr<ListItems> items = rot ? rot->listItems() : nullptr) {
-            items->add(rotationModeLabel(RotationMode::None), false);
-            items->add(rotationModeLabel(RotationMode::Half), true);
+            // Least constrained first, and Free is the default: a rotation
+            // constraint only pays off when the parts suit it, so it belongs in
+            // the user's hands rather than in the shipped state. The order is
+            // load-bearing -- rotationFromIndex and Settings::rotationIndex
+            // both follow it.
+            items->add(rotationModeLabel(RotationMode::Continuous), true);
             items->add(rotationModeLabel(RotationMode::Quarter), false);
-            items->add(rotationModeLabel(RotationMode::Continuous), false);
+            items->add(rotationModeLabel(RotationMode::Half), false);
+            items->add(rotationModeLabel(RotationMode::None), false);
+        }
+        if (rot) {
+            // ListItems::add takes no tooltip and a ListItem is not a
+            // CommandInput, so per-mode guidance has nowhere to live except the
+            // dropdown's own description.
+            rot->tooltip("Select how the solver may rotate parts.");
+            rot->tooltipDescription(
+                "Free lets a part take any angle, and is the right choice for most nests.<br>"
+                "90° and 180° steps hold every part to those increments; Fixed holds each "
+                "part at the angle it was modelled in.<br>"
+                "Constraining rotation shrinks the search space, which can give a better "
+                "nest when the parts suit it -- box-shaped or symmetric outlines -- and "
+                "costs density when they do not.");
         }
 
         // There is deliberately no time budget here. Both solver phases stop on
@@ -1389,16 +1614,22 @@ class CreatedHandler : public CommandCreatedEventHandler {
         // outlines. The label has to say that, because the checkbox is the only
         // consent anyone gives for those files.
         if (Ptr<BoolValueCommandInput> b = inputs->addBoolValueInput(
-                kInDiagnostics, "Capture diagnostics", true, "", false)) {
-            b->tooltip("Records the solver's own narrative, timings, and files containing "
-                       "the outlines of the parts in this nest.");
+                kInDiagnostics, "Capture diagnostic log", true, "", false)) {
+            b->tooltip("Capture a more detailed diagnostic log.");
+            b->tooltipDescription(
+                "Adds the part outlines and their placements, and the solver's own "
+                "fine-grained logs. Use it when submitting a bug report, or when asking "
+                "about the quality of a nest.<br>"
+                "The files are written beside the log and overwritten on the next run. "
+                "Nothing is sent anywhere.");
         }
 
         // Last, so it reads as a footer under the inputs rather than a field,
-        // and full width because it carries a sentence, not a value. Two rows:
-        // one sentence, with room for the names to wrap once. Hidden until
-        // there is something to say; activate fills it if a restored selection
-        // already has a problem.
+        // and full width because it carries sentences, not a value. Two rows
+        // is the one-sentence case, with room for the names to wrap once;
+        // refreshSetupIssues grows it when there is more than one kind of
+        // problem to report. Hidden until there is something to say; activate
+        // fills it if a restored selection already has a problem.
         if (Ptr<TextBoxCommandInput> issues =
                 inputs->addTextBoxCommandInput(kInIssues, "", "", 2, true)) {
             issues->isFullWidth(true);
@@ -1437,14 +1668,19 @@ bool registerNestCommand(const Ptr<Application>& app) {
     if (Ptr<CommandDefinition> stale = ui->commandDefinitions()->itemById(kCmdId))
         stale->deleteMe();
 
+    const std::string iconFolder = commandIconFolder();
+
     g_cmdDef = ui->commandDefinitions()->addButtonDefinition(
-        kCmdId, "FuseNest", "Nest selected parts onto a sheet");
+        kCmdId, "FuseNest", "Nest selected parts onto a sheet", iconFolder);
     if (!g_cmdDef) {
         std::string err;
         app->getLastError(&err);
         logLine("addButtonDefinition failed: " + err);
         return false;
     }
+
+    if (const std::string clip = commandToolClip(); !clip.empty())
+        g_cmdDef->toolClipFilename(clip);
 
     if (!g_cmdDef->commandCreated()->add(&g_createdHandler)) {
         logLine("commandCreated()->add failed");
@@ -1464,14 +1700,28 @@ bool registerNestCommand(const Ptr<Application>& app) {
         logLine("addCommand failed: " + err);
         return false;
     }
-    // addCommand is typed ToolbarControl, but isPromoted lives on the derived
-    // CommandControl. cast<>() returns null rather than throwing.
-    if (Ptr<CommandControl> cc = ctrl->cast<CommandControl>()) cc->isPromoted(true);
+    // Promotion is the USER's arrangement of their toolbar, not ours to set on
+    // their behalf. isPromoted(true) here looked harmless and is not, now that
+    // runOnStartup is true: registration runs on every Fusion start, so it
+    // re-promoted the button every session and a user who moved it into the
+    // overflow would find it back in the panel the next morning.
+    //
+    // isPromotedByDefault is the API's way to state a preference WITHOUT
+    // overriding a choice -- it is consulted when the UI is reset and ignored
+    // otherwise. False is the right preference for a tool reached a few times
+    // a job rather than a few times a minute. isPromoted is deliberately never
+    // set.
+    //
+    // addCommand is typed ToolbarControl, but both properties live on the
+    // derived CommandControl. cast<>() returns null rather than throwing.
+    if (Ptr<CommandControl> cc = ctrl->cast<CommandControl>())
+        cc->isPromotedByDefault(false);
 
     if (Ptr<CommandDefinition> stale = ui->commandDefinitions()->itemById(kResultCmdId))
         stale->deleteMe();
     g_resultDef = ui->commandDefinitions()->addButtonDefinition(
-        kResultCmdId, "FuseNest Result", "Shows nesting progress and applies the result");
+        kResultCmdId, "FuseNest Result", "Shows nesting progress and applies the result",
+        iconFolder);
     if (!g_resultDef || !g_resultDef->commandCreated()->add(&g_resultCreatedHandler)) {
         logLine("could not create the result command");
         return false;

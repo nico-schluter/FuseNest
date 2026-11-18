@@ -12,6 +12,8 @@ namespace fusenest {
 /// How a part may be turned on the sheet. Maps onto jagua-rs's
 /// `orientation.rotation`: the discrete modes become an explicit angle list
 /// (zero is NOT implicit there), Continuous becomes mode "continuous".
+/// The enum order is least-free first; the DIALOG lists them the other way
+/// round, so an index is never an enum value -- see rotationFromIndex.
 enum class RotationMode { None, Half, Quarter, Continuous };
 
 const char* rotationModeLabel(RotationMode mode);
@@ -25,7 +27,10 @@ struct NestRequest {
     /// still what you want when the stock is a coil rather than a sheet.
     double sheetWidthMm = 0.0;
     double partSpacingMm = 0.0;
-    RotationMode rotation = RotationMode::Half;
+    /// Unconstrained, because a constraint only pays off when the parts suit
+    /// it and costs density when they do not. Narrowing it is a tool the user
+    /// reaches for, not a default they have to undo.
+    RotationMode rotation = RotationMode::Continuous;
     /// Raises the kernel's log level from info to debug. Info already covers
     /// every cycle; debug adds sparrow's per-iteration separator output.
     bool captureDiagnostics = false;

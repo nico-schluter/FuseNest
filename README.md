@@ -248,7 +248,7 @@ and they are pinned in `CMakeLists.txt` rather than left to a preset:
 1. **Stop the add-in in Fusion** -- it holds the dylib open, and a build that
    cannot overwrite leaves you debugging stale code.
 2. Build (Cmd-Shift-B).
-3. Run from Scripts and Add-Ins, then **Utilities -> Add-Ins -> FuseNest**.
+3. Run from Scripts and Add-Ins, then **Solid -> Modify -> FuseNest**.
 4. `fusenest.log` in the repo root has the detail; the message box has the
    summary.
 

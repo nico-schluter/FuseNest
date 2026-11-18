@@ -240,6 +240,16 @@ configure_file("packaging/AddInIcon.svg" "${DIST_DIR}/AddInIcon.svg" COPYONLY)
 configure_file("packaging/resources/help.html" "${DIST_DIR}/resources/help.html" COPYONLY)
 configure_file("packaging/resources/notices.html" "${DIST_DIR}/resources/notices.html" COPYONLY)
 
+# The toolbar button's artwork, carried over from FuseNest 1.0. Fusion picks
+# the file out of the folder itself by name and resolution -- the add-in names
+# the FOLDER and never a single png -- so the whole set is staged together and
+# the names are the API's, not ours. description.png is the tool clip: the
+# image the tooltip grows into when the cursor rests on the button.
+foreach(icon 16x16 16x16@2x 32x32 32x32@2x 16x16-disabled 32x32-disabled description)
+    configure_file("packaging/resources/icons/${icon}.png"
+                   "${DIST_DIR}/resources/icons/${icon}.png" COPYONLY)
+endforeach()
+
 # Make an accidental single-architecture release build impossible to miss: an
 # arm64-only add-in loads fine here and silently fails on Intel Macs.
 if(APPLE)

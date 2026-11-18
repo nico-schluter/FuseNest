@@ -30,7 +30,12 @@ struct Settings {
     double sheetHeightMm = 1000.0;
     double sheetWidthMm = 2000.0;
     double partSpacingMm = 2.0;
-    int rotationIndex = 1;  // 0 fixed, 1 half, 2 quarter, 3 continuous
+    /// Position in the dialog's dropdown, NOT a RotationMode: 0 free,
+    /// 1 ninety-degree steps, 2 one-eighty, 3 fixed. The order was reversed
+    /// and the default moved from half to free without renaming this key,
+    /// which is only safe because no shipped build ever wrote the file -- the
+    /// settings file postdates 1.0.0. A later reorder needs a new key.
+    int rotationIndex = 0;
     /// Wall-clock ceiling on a solve, in seconds. NOT a budget and not in the
     /// dialog: both solver phases stop on convergence -- exploration on three
     /// consecutive failed separations, compression on its step decaying below

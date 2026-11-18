@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 486 486">
+  <defs>
+    <style>
+      .cls-1{fill:none;stroke:#f9ce9b;stroke-width:4;stroke-miterlimit:10}
+      .cls-2{fill:none;stroke:#ee8822;stroke-width:10.4;stroke-miterlimit:10}
+      .cls-3{fill:none;stroke:#ee8822;stroke-width:4;stroke-miterlimit:10}
+    </style>
+    <clipPath id="clip-path-1">
+      <path d="M0 243 C0 108.795 108.795 0 243 0 C377.205 0 486 108.795 486 243 C486 377.205 377.205 486 243 486 C108.795 486 0 377.205 0 243 Z"/>
+    </clipPath>
+  </defs>
+  <title>Artboard 1</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <circle cx="319.239" cy="384.526" r="76.239" class="cls-1"/>
+    <circle cx="412.137" cy="213.585" r="63.465" class="cls-1"/>
+    <circle cx="74.77" cy="238.312" r="67.699" class="cls-1"/>
+    <circle cx="420.853" cy="320.583" r="41.977" class="cls-1"/>
+    <circle cx="108.723" cy="391.687" r="36.171" class="cls-1"/>
+    <circle cx="253.78" cy="45.564" r="36.865" class="cls-1"/>
+    <circle cx="373.675" cy="76.36" r="24.166" class="cls-1"/>
+    <circle cx="114.829" cy="91.917" r="37.713" class="cls-1"/>
+    <circle cx="254.565" cy="319.495" r="11.492" class="cls-1"/>
+    <circle cx="225.475" cy="446.268" r="32.233" class="cls-1"/>
+    <circle cx="366.091" cy="286.103" r="18.95" class="cls-1"/>
+    <circle cx="409.985" cy="119.196" r="27.691" class="cls-1"/>
+    <circle cx="178.645" cy="51.474" r="33.75" class="cls-1"/>
+    <circle cx="382.294" cy="145.887" r="6.691" class="cls-1"/>
+    <circle cx="164.423" cy="439.346" r="25.311" class="cls-1"/>
+    <circle cx="126.088" cy="437.858" r="9.517" class="cls-1"/>
+    <circle cx="62.171" cy="339.808" r="30.289" class="cls-1"/>
+    <circle cx="116.878" cy="321.389" r="23.308" class="cls-1"/>
+    <circle cx="133.687" cy="351.31" r="7.599" class="cls-1"/>
+    <circle cx="62.171" cy="138.474" r="28.632" class="cls-1"/>
+    <circle cx="119.859" cy="155.514" r="22.61" class="cls-1"/>
+    <circle cx="321.219" cy="53.382" r="29.048" class="cls-1"/>
+    <circle cx="331.973" cy="197.79" r="13.92" class="cls-1"/>
+    <circle cx="462.83" cy="277.05" r="13.99" class="cls-1"/>
+    <circle cx="444.981" cy="142.813" r="11.018" class="cls-1"/>
+    <circle cx="133.687" cy="291.04" r="8.15" class="cls-1"/>
+    <circle cx="28.824" cy="308.002" r="11.999" class="cls-1"/>
+    <circle cx="340.539" cy="300.336" r="6.602" class="cls-1"/>
+    <circle cx="368.53" cy="315.125" r="7.578" class="cls-1"/>
+    <circle cx="413.363" cy="380.89" r="16.775" class="cls-1"/>
+    <circle cx="255.366" cy="195.42" r="11.55" class="cls-1"/>
+    <circle cx="276.395" cy="200.321" r="6.038" class="cls-1"/>
+    <circle cx="302.065" cy="194.932" r="11.062" class="cls-1"/>
+    <circle cx="283.765" cy="188.329" r="4.459" class="cls-1"/>
+    <circle cx="341.5" cy="217.563" r="3.978" class="cls-1"/>
+    <circle cx="134.216" cy="186.157" r="7.07" class="cls-1"/>
+    <circle cx="30.384" cy="168.748" r="11.264" class="cls-1"/>
+    <circle cx="472.467" cy="255.525" r="5.918" class="cls-1"/>
+    <circle cx="467.129" cy="299.439" r="5.021" class="cls-1"/>
+    <circle cx="270.85" cy="464.131" r="13.142" class="cls-1"/>
+    <circle cx="293.536" cy="466.587" r="6.525" class="cls-1"/>
+    <circle cx="403.372" cy="406.005" r="6.784" class="cls-1"/>
+    <circle cx="133.057" cy="44.602" r="8.779" class="cls-1"/>
+    <circle cx="66.506" cy="98.504" r="7.832" class="cls-1"/>
+    <circle cx="98.904" cy="134.965" r="5.335" class="cls-1"/>
+    <circle cx="358.453" cy="260.595" r="4.248" class="cls-1"/>
+    <circle cx="375.603" cy="108.726" r="4.607" class="cls-1"/>
+    <circle cx="457.985" cy="157.872" r="4.845" class="cls-1"/>
+    <circle cx="89.769" cy="163.029" r="5.02" class="cls-1"/>
+    <circle cx="149.654" cy="408.671" r="5.99" class="cls-1"/>
+    <circle cx="187.821" cy="465.694" r="6.117" class="cls-1"/>
+    <circle cx="237.769" cy="407.324" r="8.103" class="cls-1"/>
+    <circle cx="212.395" cy="19.092" r="9.85" class="cls-1"/>
+    <circle cx="295.866" cy="22.844" r="9.85" class="cls-1"/>
+    <circle cx="358.791" cy="45.497" r="7.082" class="cls-1"/>
+    <circle cx="406.759" cy="82.429" r="6.604" class="cls-1"/>
+    <circle cx="216.223" cy="74.796" r="7.398" class="cls-1"/>
+    <circle cx="289.649" cy="75.826" r="6.788" class="cls-1"/>
+    <circle cx="272.224" cy="187.592" r="3.139" class="cls-1"/>
+    <circle cx="62.171" cy="381.726" r="7.491" class="cls-1"/>
+    <g id="Dark" data-vc-layer="sublayer">
+      <g>
+        <circle cx="243" cy="243" r="243" class="cls-2" clip-path="url(#clip-path-1)"/>
+      </g>
+      <line x1="258.551" y1="256.347" x2="348.672" y2="256.347" class="cls-3"/>
+      <line x1="303.612" y1="211.158" x2="303.612" y2="301.974" class="cls-3"/>
+      <line x1="191.549" y1="209.765" x2="191.549" y2="302.197" class="cls-3"/>
+      <line x1="147.171" y1="370.32" x2="239.313" y2="370.32" class="cls-3"/>
+      <line x1="146.003" y1="132.903" x2="239.313" y2="132.903" class="cls-3"/>
+      <line x1="192.559" y1="86.896" x2="192.559" y2="180.013" class="cls-3"/>
+      <line x1="327.441" y1="86.896" x2="327.441" y2="180.013" class="cls-3"/>
+      <circle cx="326.353" cy="133.454" r="46.559" class="cls-3"/>
+      <circle cx="192.658" cy="132.903" r="46.655" class="cls-3"/>
+      <circle cx="192.559" cy="257.813" r="46.655" class="cls-3"/>
+      <circle cx="191.549" cy="370.32" r="46.655" class="cls-3"/>
+      <circle cx="303.612" cy="256.566" r="46.655" class="cls-3"/>
+      <line x1="190.745" y1="211.158" x2="304.257" y2="209.915" class="cls-3"/>
+      <line x1="303.612" y1="303.221" x2="191.695" y2="304.46" class="cls-3"/>
+      <line x1="192.559" y1="180.013" x2="327.441" y2="180.013" class="cls-3"/>
+      <line x1="327.441" y1="86.896" x2="190.745" y2="86.287" class="cls-3"/>
+      <line x1="146.003" y1="132.903" x2="144.895" y2="370.097" class="cls-3"/>
+      <line x1="240.388" y1="132.908" x2="238.238" y2="371.222" class="cls-3"/>
+    </g>
+  </g>
+</svg>
